@@ -1,9 +1,10 @@
 import * as XLSX from "@e965/xlsx";
 import { assetFields, type Asset, type AssetField } from "@/lib/assets";
 
-type ImportedAssetRow = {
+export type ImportedAssetRow = {
   id: string;
   fields: Record<AssetField, string>;
+  sourceRow: number;
 };
 
 const excelFieldLabels: Record<AssetField, string> = {
@@ -250,7 +251,7 @@ export function parseAssetWorkbook(
         field,
         cellText(row[index]),
       ])) as Record<AssetField, string>;
-      return { id, fields };
+      return { id, fields, sourceRow: rowIndex + dataStartIndex + 1 };
     });
 
   if (importedRows.length === 0) {

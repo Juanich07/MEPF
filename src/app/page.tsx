@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { ArrowDownToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, Fan, MapPin, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { assetFields, demoAssets, type Asset, type AssetField } from "@/lib/assets";
+import type { ImportedAssetRow } from "@/lib/asset-excel";
 import { deleteAssetFromFirestore, deleteWorkbookPageFromFirestore, firebaseConfigured, initializeAssetsInFirestore, saveAssetToFirestore, saveAssetsToFirestore, saveIndexEntriesToFirestore, saveTermDefinitionsToFirestore, saveWorkbookPageToFirestore, watchAssetsInFirestore, watchIndexEntriesInFirestore, watchTermDefinitionsInFirestore, watchWorkbookPagesInFirestore } from "@/lib/firebase";
 import { defaultSheets, indexEntries, termDefinitions, type IndexEntry, type TermDefinition, type WorkbookSheet } from "@/lib/sheets";
 
@@ -88,6 +89,7 @@ export default function Home() {
   const [editingIndexRow, setEditingIndexRow] = useState<IndexEntry | null>(null);
   const [editingDefinition, setEditingDefinition] = useState<TermDefinition | null>(null);
   const [editingDefinitionOriginalTerm, setEditingDefinitionOriginalTerm] = useState<string | null>(null);
+  const [pendingImport, setPendingImport] = useState<{ rows: ImportedAssetRow[]; group: string; groupLabel: string } | null>(null);
   const [referenceFormError, setReferenceFormError] = useState("");
   const [assetsInitialized, setAssetsInitialized] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -428,25 +430,46 @@ export default function Home() {
       const importedRows = parseAssetWorkbook(await file.arrayBuffer(), fieldLabels);
       const existingById = new Map(currentGroupAssets.map((asset) => [asset.id, asset]));
       const importedIds = new Set<string>();
-      for (const [index, row] of importedRows.entries()) {
+      for (const row of importedRows) {
         if (!row.id) continue;
         if (importedIds.has(row.id)) throw new Error(`Record ID "${row.id}" appears more than once.`);
         importedIds.add(row.id);
         const existing = existingById.get(row.id);
         if (!existing) {
-          throw new Error(`Record ID "${row.id}" on spreadsheet row ${index + 2} does not belong to this page.`);
-        }
-        if (row.fields.equipmentGroup && row.fields.equipmentGroup.toLowerCase() !== group.toLowerCase()) {
-          throw new Error(`The equipment group on spreadsheet row ${index + 2} does not match this page.`);
+          throw new Error(`Record ID "${row.id}" on spreadsheet row ${row.sourceRow} does not belong to this page.`);
         }
       }
 
-      const newRows = importedRows.filter((row) => !row.id).length;
-      const updatedRows = importedRows.length - newRows;
-      if (!window.confirm(
-        `Import ${importedRows.length} rows into ${groupLabel}? This will update ${updatedRows} existing records and add ${newRows} new records. Other records will not be deleted.`,
-      )) return;
+      setPendingImport({ rows: importedRows, group, groupLabel });
+    } catch (error) {
+      setNotice(`Excel import failed: ${errorDetails(error)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
 
+  async function confirmExcelImport() {
+    if (!pendingImport) return;
+    const { rows: importedRows, group } = pendingImport;
+    const currentGroupAssets = assets.filter((asset) => asset.equipmentGroup.toLowerCase() === group.toLowerCase());
+    const existingById = new Map(currentGroupAssets.map((asset) => [asset.id, asset]));
+    const importedIds = new Set<string>();
+    for (const row of importedRows) {
+      if (!row.id) continue;
+      if (importedIds.has(row.id)) {
+        setNotice(`Excel import failed: Record ID "${row.id}" appears more than once.`);
+        return;
+      }
+      importedIds.add(row.id);
+      if (!existingById.has(row.id)) {
+        setNotice(`Excel import failed: Record ID "${row.id}" on spreadsheet row ${row.sourceRow} does not belong to this page.`);
+        return;
+      }
+    }
+    const newRows = importedRows.filter((row) => !row.id).length;
+    const updatedRows = importedRows.length - newRows;
+    setIsSaving(true);
+    try {
       let nextSortOrder = Math.max(0, ...currentGroupAssets.map((asset) => asset.sortOrder ?? 0));
       const nextAssets = [...assets];
       const importedAssets: Asset[] = [];
@@ -476,6 +499,7 @@ export default function Home() {
       setPhaseFilter("All phases");
       setPage(1);
       setNotice(`Imported ${importedRows.length} rows: ${updatedRows} updated, ${newRows} added.`);
+      setPendingImport(null);
     } catch (error) {
       setNotice(`Excel import failed: ${errorDetails(error)}`);
     } finally {
@@ -727,6 +751,29 @@ export default function Home() {
             <div className="form-grid">{assetFields.map((field) => <label className={`form-field ${field === "equipmentCode" || field === "servicedArea" ? "field-wide" : ""}`} key={field}><span>{fieldLabels[field]}</span><input autoFocus={field === "equipmentGroup" && !editingAsset.id} value={editingAsset[field]} onChange={(event) => setEditingAsset({ ...editingAsset, [field]: event.target.value })} placeholder={field === "equipmentCode" ? "e.g. HVAC-4-FCU-BMT-Guest Entrance-1" : "Enter value"} /></label>)}</div>
             <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setEditingAsset(null)} disabled={isSaving}>Cancel</button><button type="submit" className="primary-button" disabled={isSaving}>{isSaving ? "Saving..." : <><Check size={16} /> Save equipment</>}</button></footer>
           </form>
+        </section>
+      </div>}
+
+      {pendingImport && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !isSaving) setPendingImport(null); }}>
+        <section className="asset-modal import-preview-modal" role="dialog" aria-modal="true" aria-labelledby="import-preview-title">
+          <header className="modal-header"><div><span className="modal-kicker">CHECK BEFORE SAVING</span><h2 id="import-preview-title">Preview Excel import · {pendingImport.groupLabel}</h2></div><button className="icon-button modal-close" onClick={() => setPendingImport(null)} disabled={isSaving} aria-label="Close preview"><X size={18} /></button></header>
+          <div className="import-preview-content">
+            <p className="import-preview-note">Review each spreadsheet row and its detected column values. Equipment group will be set to <strong>{pendingImport.groupLabel}</strong> automatically. Blank cells stay blank; nothing is saved until you confirm.</p>
+            <div className="import-preview-scroll">
+              <table className="import-preview-table">
+                <thead><tr><th>Spreadsheet row</th><th>Record ID</th>{assetFields.map((field) => <th key={field}>{fieldLabels[field]}</th>)}</tr></thead>
+                <tbody>{pendingImport.rows.map((row, index) => <tr key={`${row.id}-${index}`}>
+                  <td>{row.sourceRow}</td>
+                  <td>{row.id || "New"}</td>
+                  {assetFields.map((field) => <td key={field} className={!row.fields[field] ? "import-preview-empty" : ""}>
+                    {field === "equipmentGroup" ? pendingImport.group : row.fields[field] || "—"}
+                  </td>)}
+                </tr>)}</tbody>
+              </table>
+            </div>
+            <p className="import-preview-summary">{pendingImport.rows.length} rows · {pendingImport.rows.filter((row) => row.id).length} updates · {pendingImport.rows.filter((row) => !row.id).length} new records. Other records will not be deleted.</p>
+          </div>
+          <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setPendingImport(null)} disabled={isSaving}>Cancel</button><button type="button" className="primary-button" onClick={() => void confirmExcelImport()} disabled={isSaving}>{isSaving ? "Importing..." : <><Check size={16} /> Confirm import</>}</button></footer>
         </section>
       </div>}
     </main>

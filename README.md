@@ -23,7 +23,7 @@ When all six Firebase values are present, the app listens to each page's collect
 
 The Index page contains the equipment-group descriptions, and Definition of Terms contains MEPF field and condition definitions; both can be added to, edited, and deleted. Those reference pages save to Firestore when configured and to this browser otherwise. The life expectancy page shows the same equipment records as the group tabs; adding, editing, or deleting an asset there updates that shared equipment record.
 
-On an equipment-group page, use **Template** to download an Excel workbook containing that page's records in a table matching the on-screen register headings and life-expectancy subheadings. Fill in the blank rows to add equipment, or edit existing rows to update them. The Record ID column is hidden and must remain unchanged for existing rows; blank IDs add new rows. Import updates and adds rows only; it does not delete records omitted from the workbook. The equipment group is taken from the page you upload into.
+On an equipment-group page, use **Template** to download an Excel workbook containing that page's records in a table matching the on-screen register headings and life-expectancy subheadings. Fill in the blank rows to add equipment, or edit existing rows to update them. The Record ID column is hidden and must remain unchanged for existing rows; blank IDs add new rows. Before saving, the import preview shows the detected spreadsheet row and values for every column; cancel if a value is missing or appears under the wrong heading. The equipment group is set from the page you upload into. Import updates and adds rows only; it does not delete records omitted from the workbook.
 
 ## Checks
 
