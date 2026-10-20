@@ -11,8 +11,8 @@ import {
   writeBatch,
 } from "firebase/firestore";
 import { demoAssets, type Asset } from "@/lib/assets";
-import { defaultSheets } from "@/lib/sheets";
-import type { WorkbookSheet } from "@/lib/sheets";
+import { defaultSheets, indexEntries, termDefinitions } from "@/lib/sheets";
+import type { IndexEntry, TermDefinition, WorkbookSheet } from "@/lib/sheets";
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -25,6 +25,8 @@ const firebaseConfig = {
 
 const initializationMarkerId = "mepf-initialized-marker";
 const systemMarkerId = "assets-initialized";
+const indexDataDocumentId = "reference-index";
+const definitionsDataDocumentId = "reference-definitions";
 
 export const firebaseConfigured = Object.values(firebaseConfig).every(Boolean);
 
@@ -197,4 +199,50 @@ export async function saveWorkbookPageToFirestore(page: WorkbookSheet): Promise<
 
 export async function deleteWorkbookPageFromFirestore(id: string): Promise<void> {
   await deleteDoc(doc(workbookPagesCollection(), id));
+}
+
+function watchReferenceData<T>(
+  id: string,
+  defaults: T[],
+  onData: (items: T[]) => void,
+  onError: (error: Error) => void,
+) {
+  if (!database) throw new Error("Firebase is not configured.");
+  const referenceDocument = doc(database, "system", id);
+  return onSnapshot(referenceDocument, (snapshot) => {
+    if (snapshot.exists()) {
+      const data = snapshot.data().items;
+      if (!Array.isArray(data)) {
+        onError(new Error(`Reference data document "${id}" is invalid.`));
+        return;
+      }
+      onData(data as T[]);
+      return;
+    }
+    void setDoc(referenceDocument, { items: defaults }).catch(onError);
+  }, onError);
+}
+
+export function watchIndexEntriesInFirestore(
+  onEntries: (entries: IndexEntry[]) => void,
+  onError: (error: Error) => void,
+) {
+  return watchReferenceData(indexDataDocumentId, indexEntries, onEntries, onError);
+}
+
+export function watchTermDefinitionsInFirestore(
+  onDefinitions: (definitions: TermDefinition[]) => void,
+  onError: (error: Error) => void,
+) {
+  return watchReferenceData(definitionsDataDocumentId, termDefinitions, onDefinitions, onError);
+}
+
+export async function saveIndexEntriesToFirestore(entries: IndexEntry[]): Promise<void> {
+  if (!database) throw new Error("Firebase is not configured.");
+  await setDoc(doc(database, "system", indexDataDocumentId), { items: entries });
+}
+
+export async function saveTermDefinitionsToFirestore(definitions: TermDefinition[]): Promise<void> {
+  if (!database) throw new Error("Firebase is not configured.");
+  await setDoc(doc(database, "system", definitionsDataDocumentId), { items: definitions });
 }

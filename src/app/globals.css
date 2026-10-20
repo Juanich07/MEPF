@@ -84,6 +84,20 @@ h1 { margin: 10px 0 5px; font-size: 29px; line-height: 1.12; font-weight: 650; l
 .reference-table tbody tr:hover { background: #f8fbf8; }
 .reference-table tr:last-child th, .reference-table tr:last-child td { border-bottom: 0; }
 .reference-table th:last-child, .reference-table td:last-child { border-right: 0; }
+.reference-action-heading { width: 78px; text-align: center !important; }
+.reference-actions { width: 78px; min-width: 78px; text-align: center !important; white-space: nowrap; }
+.reference-actions .row-icon-button { margin: 0 2px; }
+.index-table { min-width: 590px; }
+.index-number, .index-group { text-align: center !important; }
+.index-number { width: 54px; font-weight: 650; }
+.index-group { width: 120px; font-weight: 700; }
+.page-notice { margin: -12px 0 20px; border: 1px solid #e0ece3; border-radius: 4px; }
+.reference-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.field-full { grid-column: 1 / -1; }
+.form-field textarea { width: 100%; min-height: 125px; resize: vertical; padding: 9px; border: 1px solid #dfe5e1; border-radius: 3px; outline: none; color: var(--ink); background: #fff; font: inherit; font-size: 11px; line-height: 1.5; }
+.form-field textarea:focus { border-color: #5e9274; box-shadow: 0 0 0 2px #e9f3ec; }
+.reference-form-error { margin: 0; color: #a44638; font-size: 11px; }
+.reference-modal { width: min(620px, 100%); }
 .life-table { min-width: 900px; }
 .life-table td { height: 44px; font-size: 11px; }
 .reference-empty { padding: 28px; color: #7b8580; text-align: center; }
@@ -174,6 +188,8 @@ h1 { margin: 10px 0 5px; font-size: 29px; line-height: 1.12; font-weight: 650; l
 .form-field input:focus { border-color: #5e9274; box-shadow: 0 0 0 2px #e9f3ec; }
 .form-field input::placeholder { color: #a5ada8; }
 .field-wide { grid-column: span 2; }
+.reference-form-grid { grid-template-columns: 1fr; }
+.reference-form-grid .field-full { grid-column: auto; }
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 13px 23px; border-top: 1px solid var(--line); background: #fafcfa; }
 .secondary-button { min-height: 36px; padding: 0 13px; color: #506056; border: 1px solid #dce3de; border-radius: 4px; background: #fff; font-size: 11px; font-weight: 600; }
 .secondary-button:hover { background: #f2f5f3; }

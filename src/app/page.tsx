@@ -3,11 +3,13 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { ArrowDownToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, Fan, MapPin, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { assetFields, demoAssets, type Asset, type AssetField } from "@/lib/assets";
-import { deleteAssetFromFirestore, deleteWorkbookPageFromFirestore, firebaseConfigured, initializeAssetsInFirestore, saveAssetToFirestore, saveAssetsToFirestore, saveWorkbookPageToFirestore, watchAssetsInFirestore, watchWorkbookPagesInFirestore } from "@/lib/firebase";
-import { defaultSheets, termDefinitions, type WorkbookSheet } from "@/lib/sheets";
+import { deleteAssetFromFirestore, deleteWorkbookPageFromFirestore, firebaseConfigured, initializeAssetsInFirestore, saveAssetToFirestore, saveAssetsToFirestore, saveIndexEntriesToFirestore, saveTermDefinitionsToFirestore, saveWorkbookPageToFirestore, watchAssetsInFirestore, watchIndexEntriesInFirestore, watchTermDefinitionsInFirestore, watchWorkbookPagesInFirestore } from "@/lib/firebase";
+import { defaultSheets, indexEntries, termDefinitions, type IndexEntry, type TermDefinition, type WorkbookSheet } from "@/lib/sheets";
 
 const storageKey = "mepf-assets-v1";
 const sheetsStorageKey = "mepf-workbook-sheets-v1";
+const indexStorageKey = "mepf-index-entries-v1";
+const termsStorageKey = "mepf-term-definitions-v1";
 const pageSize = 12;
 
 const fieldLabels: Record<AssetField, string> = {
@@ -73,6 +75,8 @@ function errorDetails(error: unknown) {
 export default function Home() {
   const [assets, setAssets] = useState<Asset[]>(demoAssets);
   const [sheets, setSheets] = useState<WorkbookSheet[]>(defaultSheets);
+  const [indexRows, setIndexRows] = useState<IndexEntry[]>(indexEntries);
+  const [definitionRows, setDefinitionRows] = useState<TermDefinition[]>(termDefinitions);
   const [activeSheetId, setActiveSheetId] = useState("index");
   const [addingPage, setAddingPage] = useState(false);
   const [newPageName, setNewPageName] = useState("");
@@ -81,6 +85,10 @@ export default function Home() {
   const [phaseFilter, setPhaseFilter] = useState("All phases");
   const [page, setPage] = useState(1);
   const [editingAsset, setEditingAsset] = useState<Asset | null>(null);
+  const [editingIndexRow, setEditingIndexRow] = useState<IndexEntry | null>(null);
+  const [editingDefinition, setEditingDefinition] = useState<TermDefinition | null>(null);
+  const [editingDefinitionOriginalTerm, setEditingDefinitionOriginalTerm] = useState<string | null>(null);
+  const [referenceFormError, setReferenceFormError] = useState("");
   const [assetsInitialized, setAssetsInitialized] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [notice, setNotice] = useState("");
@@ -90,6 +98,8 @@ export default function Home() {
   useEffect(() => {
     let active = true;
     let unsubscribePages: (() => void) | undefined;
+    let unsubscribeIndex: (() => void) | undefined;
+    let unsubscribeDefinitions: (() => void) | undefined;
 
     if (firebaseConfigured) {
       unsubscribePages = watchWorkbookPagesInFirestore((storedPages) => {
@@ -100,6 +110,24 @@ export default function Home() {
         if (!active) return;
         setCloudStatus("error");
         setNotice(`Workbook page sync failed: ${error.message}`);
+      });
+      unsubscribeIndex = watchIndexEntriesInFirestore((storedEntries) => {
+        if (!active) return;
+        setIndexRows(storedEntries);
+        window.localStorage.setItem(indexStorageKey, JSON.stringify(storedEntries));
+      }, (error) => {
+        if (!active) return;
+        setCloudStatus("error");
+        setNotice(`Index sync failed: ${error.message}`);
+      });
+      unsubscribeDefinitions = watchTermDefinitionsInFirestore((storedDefinitions) => {
+        if (!active) return;
+        setDefinitionRows(storedDefinitions);
+        window.localStorage.setItem(termsStorageKey, JSON.stringify(storedDefinitions));
+      }, (error) => {
+        if (!active) return;
+        setCloudStatus("error");
+        setNotice(`Definition sync failed: ${error.message}`);
       });
 
       void initializeAssetsInFirestore().then(() => {
@@ -124,6 +152,8 @@ export default function Home() {
     return () => {
       active = false;
       unsubscribePages?.();
+      unsubscribeIndex?.();
+      unsubscribeDefinitions?.();
     };
   }, []);
 
@@ -146,6 +176,20 @@ export default function Home() {
     if (savedSheets) {
       const customSheets = JSON.parse(savedSheets) as WorkbookSheet[];
       queueMicrotask(() => setSheets([...defaultSheets, ...customSheets]));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (firebaseConfigured) return;
+    const savedIndex = window.localStorage.getItem(indexStorageKey);
+    const savedDefinitions = window.localStorage.getItem(termsStorageKey);
+    if (savedIndex) {
+      const parsedIndex = JSON.parse(savedIndex) as IndexEntry[];
+      queueMicrotask(() => setIndexRows(parsedIndex));
+    }
+    if (savedDefinitions) {
+      const parsedDefinitions = JSON.parse(savedDefinitions) as TermDefinition[];
+      queueMicrotask(() => setDefinitionRows(parsedDefinitions));
     }
   }, []);
 
@@ -181,6 +225,113 @@ export default function Home() {
     window.localStorage.setItem(storageKey, JSON.stringify(nextAssets));
   }
 
+  async function saveIndexRows(nextRows: IndexEntry[]) {
+    if (firebaseConfigured) await saveIndexEntriesToFirestore(nextRows);
+    window.localStorage.setItem(indexStorageKey, JSON.stringify(nextRows));
+    setIndexRows(nextRows);
+  }
+
+  async function saveDefinitions(nextRows: TermDefinition[]) {
+    if (firebaseConfigured) await saveTermDefinitionsToFirestore(nextRows);
+    window.localStorage.setItem(termsStorageKey, JSON.stringify(nextRows));
+    setDefinitionRows(nextRows);
+  }
+
+  async function handleIndexRowSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingIndexRow) return;
+    const number = editingIndexRow.number.trim();
+    const equipmentGroup = editingIndexRow.equipmentGroup.trim();
+    const description = editingIndexRow.description.trim();
+    if (!description) {
+      setReferenceFormError("Description is required.");
+      return;
+    }
+    if (number && !/^\d+$/.test(number)) {
+      setReferenceFormError("The index number must contain digits only.");
+      return;
+    }
+    const savedRow: IndexEntry = {
+      ...editingIndexRow,
+      id: editingIndexRow.id || `index-${crypto.randomUUID()}`,
+      number,
+      equipmentGroup,
+      description,
+    };
+    const nextRows = indexRows.some((row) => row.id === savedRow.id)
+      ? indexRows.map((row) => row.id === savedRow.id ? savedRow : row)
+      : [...indexRows, savedRow];
+    setIsSaving(true);
+    try {
+      await saveIndexRows(nextRows);
+      setEditingIndexRow(null);
+      setNotice(firebaseConfigured ? "Index entry saved to Firestore." : "Index entry saved on this device.");
+    } catch (error) {
+      setReferenceFormError(`Index save failed: ${errorDetails(error)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDefinitionSave(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!editingDefinition) return;
+    const term = editingDefinition.term.trim();
+    const definition = editingDefinition.definition.trim();
+    if (!term || !definition) {
+      setReferenceFormError("Both term and definition are required.");
+      return;
+    }
+    if (definitionRows.some((row) =>
+      row.term.toLowerCase() === term.toLowerCase()
+      && row.term !== editingDefinitionOriginalTerm,
+    )) {
+      setReferenceFormError("A definition for that term already exists.");
+      return;
+    }
+    const savedDefinition = { term, definition };
+    const nextRows = editingDefinitionOriginalTerm !== null
+      ? definitionRows.map((row) => row.term === editingDefinitionOriginalTerm ? savedDefinition : row)
+      : [...definitionRows, savedDefinition];
+    setIsSaving(true);
+    try {
+      await saveDefinitions(nextRows);
+      setEditingDefinition(null);
+      setEditingDefinitionOriginalTerm(null);
+      setNotice(firebaseConfigured ? "Definition saved to Firestore." : "Definition saved on this device.");
+    } catch (error) {
+      setReferenceFormError(`Definition save failed: ${errorDetails(error)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function deleteIndexRow(row: IndexEntry) {
+    if (!window.confirm(`Delete the “${row.description}” index entry?`)) return;
+    setIsSaving(true);
+    try {
+      await saveIndexRows(indexRows.filter((item) => item.id !== row.id));
+      setNotice(firebaseConfigured ? "Index entry deleted from Firestore." : "Index entry deleted.");
+    } catch (error) {
+      setNotice(`Index delete failed: ${errorDetails(error)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function deleteDefinition(definition: TermDefinition) {
+    if (!window.confirm(`Delete the “${definition.term}” definition?`)) return;
+    setIsSaving(true);
+    try {
+      await saveDefinitions(definitionRows.filter((item) => item.term !== definition.term));
+      setNotice(firebaseConfigured ? "Definition deleted from Firestore." : "Definition deleted.");
+    } catch (error) {
+      setNotice(`Definition delete failed: ${errorDetails(error)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   async function addWorkbookPage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const label = newPageName.trim();
@@ -210,7 +361,7 @@ export default function Home() {
   }
 
   async function deleteWorkbookPage(sheet: WorkbookSheet) {
-    if (!window.confirm(`Delete the “${sheet.label}” page? Its equipment will remain in the Index and Firestore.`)) return;
+    if (!window.confirm(`Delete the “${sheet.label}” page? Its equipment records will remain in the workbook.`)) return;
     const customSheets = sheets.filter((item) => item.id !== sheet.id && !defaultSheets.some((initial) => initial.id === item.id));
     setIsSaving(true);
     try {
@@ -235,6 +386,7 @@ export default function Home() {
   function startAddingAsset() {
     const asset = blankAsset();
     if (activeSheet.kind === "group") asset.equipmentGroup = activeSheet.group ?? activeSheet.label;
+    if (activeSheet.kind === "life") asset.equipmentGroup = "Unassigned";
     setEditingAsset(asset);
   }
 
@@ -430,8 +582,8 @@ export default function Home() {
       <section className="page-content" id="workbook-page" role="tabpanel" aria-labelledby={`tab-${activeSheet.id}`}>
         <div className="page-heading">
           <div>
-            <h1>{activeSheet.kind === "index" ? "ASSET MANAGEMENT - MEPF" : activeSheet.label}</h1>
-            <p className="page-subtitle">{activeSheet.kind === "terms" ? "Reference guide for asset register fields" : activeSheet.kind === "life" ? "Service life and replacement planning by equipment" : activeSheet.kind === "group" ? `Equipment records for ${activeSheet.group ?? activeSheet.label}` : "Equipment inventory and replacement planning"}</p>
+            <h1>{activeSheet.kind === "index" ? "INDEX" : activeSheet.label}</h1>
+            <p className="page-subtitle">{activeSheet.kind === "terms" ? "Reference guide for MEPF equipment terms and condition ratings" : activeSheet.kind === "life" ? "Service life and replacement planning by equipment" : activeSheet.kind === "group" ? `Equipment records for ${activeSheet.group ?? activeSheet.label}` : "Equipment groups and descriptions"}</p>
           </div>
           <div className="page-heading-actions">
             {!defaultSheets.some((sheet) => sheet.id === activeSheet.id) && <button className="delete-page-button" onClick={() => void deleteWorkbookPage(activeSheet)} disabled={isSaving}><Trash2 size={15} /> Delete page</button>}
@@ -447,24 +599,35 @@ export default function Home() {
                 onChange={(event) => void handleExcelUpload(event)}
               />
             </>}
-            {activeSheet.kind !== "terms" && activeSheet.kind !== "life" && <button className="primary-button" onClick={startAddingAsset}><Plus size={17} /> Add equipment</button>}
+            {activeSheet.kind === "index" && <button className="primary-button" onClick={() => { setReferenceFormError(""); setEditingIndexRow({ id: "", number: "", equipmentGroup: "", description: "" }); }} disabled={isSaving}><Plus size={17} /> Add index row</button>}
+            {activeSheet.kind === "terms" && <button className="primary-button" onClick={() => { setReferenceFormError(""); setEditingDefinition({ term: "", definition: "" }); setEditingDefinitionOriginalTerm(null); }} disabled={isSaving}><Plus size={17} /> Add term</button>}
+            {(activeSheet.kind === "group" || activeSheet.kind === "life") && <button className="primary-button" onClick={startAddingAsset} disabled={isSaving}><Plus size={17} /> Add equipment</button>}
           </div>
         </div>
+
+        {notice && <div className="notice page-notice" role="status"><Check size={14} />{notice}<button onClick={() => setNotice("")} aria-label="Dismiss message"><X size={14} /></button></div>}
 
         {activeSheet.kind === "terms" ? (
           <section className="reference-sheet" aria-label="Definitions">
             <table className="reference-table">
-              <thead><tr><th>TERM</th><th>DEFINITION</th></tr></thead>
-              <tbody>{termDefinitions.map((item) => <tr key={item.term}><th scope="row">{item.term}</th><td>{item.definition}</td></tr>)}</tbody>
+              <thead><tr><th>TERM</th><th>DEFINITION</th><th className="reference-action-heading">ACTIONS</th></tr></thead>
+              <tbody>{definitionRows.map((item) => <tr key={item.term}><th scope="row">{item.term}</th><td>{item.definition}</td><td className="reference-actions"><button className="row-icon-button" onClick={() => { setReferenceFormError(""); setEditingDefinition({ ...item }); setEditingDefinitionOriginalTerm(item.term); }} disabled={isSaving} aria-label={`Edit ${item.term}`} title="Edit definition"><Pencil size={14} /></button><button className="row-icon-button delete-action" onClick={() => void deleteDefinition(item)} disabled={isSaving} aria-label={`Delete ${item.term}`} title="Delete definition"><Trash2 size={14} /></button></td></tr>)}</tbody>
             </table>
           </section>
         ) : activeSheet.kind === "life" ? (
           <section className="reference-sheet" aria-label="MEPF life expectancy">
             <table className="reference-table life-table">
-              <thead><tr><th>EQUIPMENT CODE</th><th>SERVICED AREA</th><th>INSTALLATION YEAR</th><th>NORMAL LIFE</th><th>PRESENT CONDITION</th><th>ADJUSTED LIFE</th><th>REPLACEMENT YEAR</th></tr></thead>
-              <tbody>{filteredAssets.map((asset) => <tr key={asset.id}><td>{asset.equipmentCode || "—"}</td><td>{asset.servicedArea || "—"}</td><td>{asset.installationYear || "—"}</td><td>{asset.normalLife || "—"}</td><td>{asset.presentCondition || "—"}</td><td>{asset.adjustedLife || "—"}</td><td>{asset.replacementYear || "—"}</td></tr>)}</tbody>
+              <thead><tr><th>EQUIPMENT CODE</th><th>SERVICED AREA</th><th>INSTALLATION YEAR</th><th>NORMAL LIFE</th><th>PRESENT CONDITION</th><th>ADJUSTED LIFE</th><th>REPLACEMENT YEAR</th><th className="reference-action-heading">ACTIONS</th></tr></thead>
+              <tbody>{filteredAssets.map((asset) => <tr key={asset.id}><td>{asset.equipmentCode || "—"}</td><td>{asset.servicedArea || "—"}</td><td>{asset.installationYear || "—"}</td><td>{asset.normalLife || "—"}</td><td>{asset.presentCondition || "—"}</td><td>{asset.adjustedLife || "—"}</td><td>{asset.replacementYear || "—"}</td><td className="reference-actions"><button className="row-icon-button" onClick={() => setEditingAsset({ ...asset })} disabled={isSaving} aria-label={`Edit ${asset.equipmentCode || asset.servicedArea}`} title="Edit equipment"><Pencil size={14} /></button><button className="row-icon-button delete-action" onClick={() => void handleDelete(asset)} disabled={isSaving} aria-label={`Delete ${asset.equipmentCode || asset.servicedArea}`} title="Delete equipment"><Trash2 size={14} /></button></td></tr>)}</tbody>
             </table>
             {filteredAssets.length === 0 && <p className="reference-empty">No assets are available for life expectancy planning.</p>}
+          </section>
+        ) : activeSheet.kind === "index" ? (
+          <section className="reference-sheet" aria-label="Equipment group index">
+            <table className="reference-table index-table">
+              <thead><tr><th>NO.</th><th>EQPT GROUP</th><th>DESCRIPTION</th><th className="reference-action-heading">ACTIONS</th></tr></thead>
+              <tbody>{indexRows.map((row) => <tr key={row.id}><td className="index-number">{row.number}</td><td className="index-group">{row.equipmentGroup}</td><td>{row.description}</td><td className="reference-actions"><button className="row-icon-button" onClick={() => { setReferenceFormError(""); setEditingIndexRow({ ...row }); }} disabled={isSaving} aria-label={`Edit ${row.description}`} title="Edit index row"><Pencil size={14} /></button><button className="row-icon-button delete-action" onClick={() => void deleteIndexRow(row)} disabled={isSaving} aria-label={`Delete ${row.description}`} title="Delete index row"><Trash2 size={14} /></button></td></tr>)}</tbody>
+            </table>
           </section>
         ) : <>
         <div className="summary-row" aria-label="Asset summary">
@@ -484,8 +647,6 @@ export default function Home() {
               <button className="icon-button export-button" onClick={exportCsv} title="Export visible rows as CSV" aria-label="Export CSV"><ArrowDownToLine size={16} /><span>Export</span></button>
             </div>
           </div>
-
-          {notice && <div className="notice" role="status"><Check size={14} />{notice}<button onClick={() => setNotice("")} aria-label="Dismiss message"><X size={14} /></button></div>}
 
           <div className="table-scroll">
             <table className="asset-table">
@@ -526,6 +687,35 @@ export default function Home() {
           <form onSubmit={(event) => void addWorkbookPage(event)}>
             <div className="add-page-form"><label className="form-field"><span>Page name</span><input autoFocus value={newPageName} onChange={(event) => setNewPageName(event.target.value)} placeholder="e.g. Plumbing-1" required /></label><p>Equipment added on this page will use the page name as its equipment group.</p></div>
             <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setAddingPage(false)} disabled={isSaving}>Cancel</button><button type="submit" className="primary-button" disabled={isSaving}>{isSaving ? "Saving..." : <><Plus size={16} /> Create page</>}</button></footer>
+          </form>
+        </section>
+      </div>}
+
+      {editingIndexRow && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !isSaving) setEditingIndexRow(null); }}>
+        <section className="asset-modal reference-modal" role="dialog" aria-modal="true" aria-labelledby="index-row-title">
+          <header className="modal-header"><div><span className="modal-kicker">INDEX</span><h2 id="index-row-title">{editingIndexRow.id ? "Edit index row" : "Add index row"}</h2></div><button className="icon-button modal-close" onClick={() => setEditingIndexRow(null)} disabled={isSaving} aria-label="Close dialog"><X size={18} /></button></header>
+          <form onSubmit={(event) => void handleIndexRowSave(event)}>
+            <div className="form-grid reference-form-grid">
+              <label className="form-field"><span>No.</span><input autoFocus value={editingIndexRow.number} onChange={(event) => { setReferenceFormError(""); setEditingIndexRow({ ...editingIndexRow, number: event.target.value }); }} placeholder="e.g. 1" inputMode="numeric" /></label>
+              <label className="form-field"><span>Equipment group</span><input value={editingIndexRow.equipmentGroup} onChange={(event) => { setReferenceFormError(""); setEditingIndexRow({ ...editingIndexRow, equipmentGroup: event.target.value }); }} placeholder="e.g. HVAC-1" /></label>
+              <label className="form-field field-full"><span>Description</span><textarea value={editingIndexRow.description} onChange={(event) => { setReferenceFormError(""); setEditingIndexRow({ ...editingIndexRow, description: event.target.value }); }} placeholder="Enter equipment group or equipment description" required /></label>
+              {referenceFormError && <p className="reference-form-error field-full" role="alert">{referenceFormError}</p>}
+            </div>
+            <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setEditingIndexRow(null)} disabled={isSaving}>Cancel</button><button type="submit" className="primary-button" disabled={isSaving}>{isSaving ? "Saving..." : <><Check size={16} /> Save index row</>}</button></footer>
+          </form>
+        </section>
+      </div>}
+
+      {editingDefinition && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !isSaving) setEditingDefinition(null); }}>
+        <section className="asset-modal reference-modal" role="dialog" aria-modal="true" aria-labelledby="definition-title">
+          <header className="modal-header"><div><span className="modal-kicker">DEFINITION OF TERMS</span><h2 id="definition-title">{editingDefinitionOriginalTerm !== null ? "Edit definition" : "Add definition"}</h2></div><button className="icon-button modal-close" onClick={() => { setEditingDefinition(null); setEditingDefinitionOriginalTerm(null); }} disabled={isSaving} aria-label="Close dialog"><X size={18} /></button></header>
+          <form onSubmit={(event) => void handleDefinitionSave(event)}>
+            <div className="form-grid reference-form-grid">
+              <label className="form-field field-full"><span>Term</span><input autoFocus value={editingDefinition.term} onChange={(event) => { setReferenceFormError(""); setEditingDefinition({ ...editingDefinition, term: event.target.value }); }} placeholder="Enter term" required /></label>
+              <label className="form-field field-full"><span>Definition</span><textarea value={editingDefinition.definition} onChange={(event) => { setReferenceFormError(""); setEditingDefinition({ ...editingDefinition, definition: event.target.value }); }} placeholder="Enter definition" required /></label>
+              {referenceFormError && <p className="reference-form-error field-full" role="alert">{referenceFormError}</p>}
+            </div>
+            <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => { setEditingDefinition(null); setEditingDefinitionOriginalTerm(null); }} disabled={isSaving}>Cancel</button><button type="submit" className="primary-button" disabled={isSaving}>{isSaving ? "Saving..." : <><Check size={16} /> Save definition</>}</button></footer>
           </form>
         </section>
       </div>}
