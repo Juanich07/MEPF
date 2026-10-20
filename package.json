@@ -9,11 +9,13 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@e965/xlsx": "^0.20.3",
     "firebase": "^11.10.0",
     "lucide-react": "^1.55.0",
     "next": "16.4.0",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "write-excel-file": "^4.1.1"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",

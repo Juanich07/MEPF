@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { ArrowDownToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, Fan, MapPin, Pencil, Plus, Search, Trash2, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { ArrowDownToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, Fan, MapPin, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
 import { assetFields, demoAssets, type Asset, type AssetField } from "@/lib/assets";
-import { deleteAssetFromFirestore, deleteWorkbookPageFromFirestore, firebaseConfigured, initializeAssetsInFirestore, saveAssetToFirestore, saveWorkbookPageToFirestore, watchAssetsInFirestore, watchWorkbookPagesInFirestore } from "@/lib/firebase";
+import { deleteAssetFromFirestore, deleteWorkbookPageFromFirestore, firebaseConfigured, initializeAssetsInFirestore, saveAssetToFirestore, saveAssetsToFirestore, saveWorkbookPageToFirestore, watchAssetsInFirestore, watchWorkbookPagesInFirestore } from "@/lib/firebase";
 import { defaultSheets, termDefinitions, type WorkbookSheet } from "@/lib/sheets";
 
 const storageKey = "mepf-assets-v1";
@@ -63,7 +63,7 @@ function csvValue(value: string) {
 function errorDetails(error: unknown) {
   if (error && typeof error === "object") {
     const detail = error as { code?: unknown; message?: unknown };
-    const code = typeof detail.code === "string" ? detail.code : "Firebase error";
+    const code = typeof detail.code === "string" ? detail.code : "Error";
     const message = typeof detail.message === "string" ? detail.message : "Unknown error";
     return `${code}: ${message}`;
   }
@@ -85,6 +85,7 @@ export default function Home() {
   const [isSaving, setIsSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const [cloudStatus, setCloudStatus] = useState(firebaseConfigured ? "connecting" : "local");
+  const importFileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let active = true;
@@ -249,6 +250,87 @@ export default function Home() {
     URL.revokeObjectURL(url);
   }
 
+  async function downloadExcelTemplate() {
+    const group = activeSheet.group ?? activeSheet.label;
+    const groupAssets = assets.filter((asset) => asset.equipmentGroup.toLowerCase() === group.toLowerCase());
+    try {
+      const { downloadAssetTemplate } = await import("@/lib/asset-excel");
+      await downloadAssetTemplate(group, groupAssets);
+      setNotice(`Excel template downloaded for ${activeSheet.label}.`);
+    } catch (error) {
+      setNotice(`Could not create the Excel template: ${errorDetails(error)}`);
+    }
+  }
+
+  async function handleExcelUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    const group = activeSheet.group ?? activeSheet.label;
+    const groupLabel = activeSheet.label;
+    const currentGroupAssets = assets.filter((asset) => asset.equipmentGroup.toLowerCase() === group.toLowerCase());
+    setIsSaving(true);
+    try {
+      const { parseAssetWorkbook } = await import("@/lib/asset-excel");
+      const importedRows = parseAssetWorkbook(await file.arrayBuffer(), fieldLabels);
+      const existingById = new Map(currentGroupAssets.map((asset) => [asset.id, asset]));
+      const importedIds = new Set<string>();
+      for (const [index, row] of importedRows.entries()) {
+        if (!row.id) continue;
+        if (importedIds.has(row.id)) throw new Error(`Record ID "${row.id}" appears more than once.`);
+        importedIds.add(row.id);
+        const existing = existingById.get(row.id);
+        if (!existing) {
+          throw new Error(`Record ID "${row.id}" on spreadsheet row ${index + 2} does not belong to this page.`);
+        }
+        if (row.fields.equipmentGroup && row.fields.equipmentGroup.toLowerCase() !== group.toLowerCase()) {
+          throw new Error(`The equipment group on spreadsheet row ${index + 2} does not match this page.`);
+        }
+      }
+
+      const newRows = importedRows.filter((row) => !row.id).length;
+      const updatedRows = importedRows.length - newRows;
+      if (!window.confirm(
+        `Import ${importedRows.length} rows into ${groupLabel}? This will update ${updatedRows} existing records and add ${newRows} new records. Other records will not be deleted.`,
+      )) return;
+
+      let nextSortOrder = Math.max(0, ...currentGroupAssets.map((asset) => asset.sortOrder ?? 0));
+      const nextAssets = [...assets];
+      const importedAssets: Asset[] = [];
+      for (const row of importedRows) {
+        const existing = row.id ? existingById.get(row.id) : undefined;
+        const id = existing?.id ?? `zzzz-asset-${Date.now()}-${crypto.randomUUID()}`;
+        const asset: Asset = {
+          ...row.fields,
+          id,
+          equipmentGroup: group,
+          sortOrder: existing?.sortOrder ?? ++nextSortOrder,
+          remarksColor: existing?.remarksColor ?? "",
+        };
+        const existingIndex = nextAssets.findIndex((item) => item.id === id);
+        if (existingIndex >= 0) nextAssets[existingIndex] = asset;
+        else nextAssets.push(asset);
+        importedAssets.push(asset);
+      }
+
+      if (firebaseConfigured) {
+        await saveAssetsToFirestore(importedAssets, group);
+      }
+      persistLocally(nextAssets);
+      setAssets(nextAssets);
+      setSearch("");
+      setLocationFilter("All locations");
+      setPhaseFilter("All phases");
+      setPage(1);
+      setNotice(`Imported ${importedRows.length} rows: ${updatedRows} updated, ${newRows} added.`);
+    } catch (error) {
+      setNotice(`Excel import failed: ${errorDetails(error)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   async function handleSave(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!editingAsset) return;
@@ -336,12 +418,13 @@ export default function Home() {
                 role="tab"
                 aria-selected={activeSheetId === sheet.id}
                 aria-controls="workbook-page"
+                disabled={isSaving}
                 onClick={() => { setActiveSheetId(sheet.id); setPage(1); setSearch(""); setLocationFilter("All locations"); setPhaseFilter("All phases"); }}
               >{sheet.label}</button>
             </div>;
           })}
         </div>
-        <button className="add-sheet-button" onClick={() => setAddingPage(true)} aria-label="Add page" title="Add page"><Plus size={16} /></button>
+        <button className="add-sheet-button" onClick={() => setAddingPage(true)} disabled={isSaving} aria-label="Add page" title="Add page"><Plus size={16} /></button>
       </nav>
 
       <section className="page-content" id="workbook-page" role="tabpanel" aria-labelledby={`tab-${activeSheet.id}`}>
@@ -352,6 +435,18 @@ export default function Home() {
           </div>
           <div className="page-heading-actions">
             {!defaultSheets.some((sheet) => sheet.id === activeSheet.id) && <button className="delete-page-button" onClick={() => void deleteWorkbookPage(activeSheet)} disabled={isSaving}><Trash2 size={15} /> Delete page</button>}
+            {activeSheet.kind === "group" && <>
+              <button className="icon-button excel-template-button" onClick={() => void downloadExcelTemplate()} disabled={isSaving || (firebaseConfigured && cloudStatus !== "connected")} title="Download Excel template"><ArrowDownToLine size={16} /> Template</button>
+              <button className="icon-button excel-upload-button" onClick={() => importFileInput.current?.click()} disabled={isSaving || (firebaseConfigured && cloudStatus !== "connected")} title="Upload completed Excel workbook"><Upload size={16} /> Upload Excel</button>
+              <input
+                ref={importFileInput}
+                className="sr-only"
+                type="file"
+                accept=".xlsx,.xls"
+                aria-label="Choose an Excel workbook to import"
+                onChange={(event) => void handleExcelUpload(event)}
+              />
+            </>}
             {activeSheet.kind !== "terms" && activeSheet.kind !== "life" && <button className="primary-button" onClick={startAddingAsset}><Plus size={17} /> Add equipment</button>}
           </div>
         </div>

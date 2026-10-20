@@ -53,6 +53,7 @@ button:disabled { cursor: wait; opacity: .65; }
 .page-content { max-width: 1760px; margin: 0 auto; padding: 41px 4.7% 24px; }
 .page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 25px; }
 .page-heading-actions { display: flex; flex: 0 0 auto; align-items: center; flex-wrap: nowrap; gap: 8px; }
+.excel-template-button, .excel-upload-button { white-space: nowrap; }
 .delete-page-button { min-width: max-content; min-height: 38px; display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 7px; padding: 0 12px; border: 1px solid #e4c9c3; border-radius: 4px; color: #91483c; background: #fff; font-size: 12px; font-weight: 600; white-space: nowrap; }
 .delete-page-button svg { flex: 0 0 auto; }
 .delete-page-button:hover { border-color: #c98c7f; color: #7e3429; background: #fbefec; }

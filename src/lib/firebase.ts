@@ -160,6 +160,17 @@ export async function saveAssetToFirestore(asset: Asset, previousGroup = asset.e
   await setDoc(doc(nextCollection, asset.id), asset);
 }
 
+export async function saveAssetsToFirestore(assets: Asset[], group: string): Promise<void> {
+  const groupCollection = assetGroupCollection(group);
+  for (let index = 0; index < assets.length; index += 450) {
+    const batch = writeBatch(database!);
+    for (const asset of assets.slice(index, index + 450)) {
+      batch.set(doc(groupCollection, asset.id), asset);
+    }
+    await batch.commit();
+  }
+}
+
 export async function deleteAssetFromFirestore(asset: Asset): Promise<void> {
   await deleteDoc(doc(assetGroupCollection(asset.equipmentGroup || "Unassigned"), asset.id));
 }

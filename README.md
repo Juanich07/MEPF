@@ -21,6 +21,8 @@ Open the local URL printed by Next.js. Without Firebase settings, the app loads 
 
 When all six Firebase values are present, the app listens to each page's collection separately and writes equipment create, update, and delete operations to the matching equipment-group collection. The Index and life expectancy views combine records from all page collections. Custom pages are saved to `workbookPages` and sync across clients. On first launch after this update, records in the old shared `assets` collection are moved into their equipment-group collections. Without Firebase settings, the app uses local storage in the current browser. The table supports search, location and phase filters, and CSV export of visible rows.
 
+On an equipment-group page, use **Template** to download an Excel workbook containing that page's records in a table matching the on-screen register headings and life-expectancy subheadings. Fill in the blank rows to add equipment, or edit existing rows to update them. The Record ID column is hidden and must remain unchanged for existing rows; blank IDs add new rows. Import updates and adds rows only; it does not delete records omitted from the workbook. The equipment group is taken from the page you upload into.
+
 ## Checks
 
 ```bash
