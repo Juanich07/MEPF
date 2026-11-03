@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
-import { ArrowDownToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, Fan, MapPin, Pencil, Plus, Search, Trash2, Upload, X } from "lucide-react";
+import { onAuthStateChanged, signInWithEmailAndPassword, signOut, type User } from "firebase/auth";
+import { createPortal } from "react-dom";
+import { ArrowDownToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, Fan, History, LogOut, MapPin, Menu, Pencil, Plus, Search, ShieldCheck, Trash2, Upload, Users, X } from "lucide-react";
 import { assetFields, demoAssets, type Asset, type AssetField } from "@/lib/assets";
 import type { ImportedAssetRow } from "@/lib/asset-excel";
-import { deleteAssetFromFirestore, deleteWorkbookPageFromFirestore, firebaseConfigured, initializeAssetsInFirestore, saveAssetToFirestore, saveAssetsToFirestore, saveIndexEntriesToFirestore, saveTermDefinitionsToFirestore, saveWorkbookPageToFirestore, watchAssetsInFirestore, watchIndexEntriesInFirestore, watchTermDefinitionsInFirestore, watchWorkbookPagesInFirestore } from "@/lib/firebase";
+import { auth, deleteAssetFromFirestore, deleteWorkbookPageFromFirestore, firebaseConfigured, initializeAssetsInFirestore, recordAdminActivity, saveAssetToFirestore, saveAssetsToFirestore, saveIndexEntriesToFirestore, saveTermDefinitionsToFirestore, saveWorkbookPageToFirestore, syncAdminUserProfile, watchAdminDashboard, watchAssetsInFirestore, watchIndexEntriesInFirestore, watchTermDefinitionsInFirestore, watchWorkbookPagesInFirestore, type AdminActivity, type AdminActivityInput, type AdminUserProfile } from "@/lib/firebase";
 import { defaultSheets, indexEntries, termDefinitions, type IndexEntry, type TermDefinition, type WorkbookSheet } from "@/lib/sheets";
 
 const storageKey = "mepf-assets-v1";
@@ -95,13 +97,82 @@ export default function Home() {
   const [isSaving, setIsSaving] = useState(false);
   const [notice, setNotice] = useState("");
   const [cloudStatus, setCloudStatus] = useState(firebaseConfigured ? "connecting" : "local");
+  const [user, setUser] = useState<User | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [authLoading, setAuthLoading] = useState(firebaseConfigured);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [adminPanelOpen, setAdminPanelOpen] = useState(false);
+  const [adminUsers, setAdminUsers] = useState<AdminUserProfile[]>([]);
+  const [adminActivities, setAdminActivities] = useState<AdminActivity[]>([]);
+  const [adminDashboardLoading, setAdminDashboardLoading] = useState(false);
+  const [adminDashboardError, setAdminDashboardError] = useState("");
   const importFileInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!auth) return;
+    let active = true;
+    let authChangeId = 0;
+    const unsubscribeAuth = onAuthStateChanged(auth, async (currentUser) => {
+      const currentChangeId = ++authChangeId;
+      if (!active) return;
+      setUser(currentUser);
+      setIsAdmin(false);
+      if (!currentUser) {
+        setAuthLoading(false);
+        return;
+      }
+      let verifiedAdmin = false;
+      let tokenVerified = false;
+      try {
+        const token = await currentUser.getIdTokenResult();
+        verifiedAdmin = token.claims.admin === true;
+        tokenVerified = true;
+        if (active && currentChangeId === authChangeId) setIsAdmin(verifiedAdmin);
+      } catch (error) {
+        if (active && currentChangeId === authChangeId && tokenVerified) {
+          setNotice(`Could not verify account permissions: ${errorDetails(error)}`);
+        }
+      } finally {
+        if (active && currentChangeId === authChangeId) setAuthLoading(false);
+      }
+      if (active && currentChangeId === authChangeId) {
+        try {
+          await syncAdminUserProfile(currentUser, verifiedAdmin);
+        } catch (error) {
+          if (active && currentChangeId === authChangeId) {
+            setNotice(`Could not update your admin user list profile: ${errorDetails(error)}`);
+          }
+        }
+      }
+    });
+    return () => {
+      active = false;
+      unsubscribeAuth();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isAdmin || !adminPanelOpen) return;
+    return watchAdminDashboard((storedUsers, storedActivities) => {
+      setAdminUsers(storedUsers);
+      setAdminActivities(storedActivities);
+      setAdminDashboardLoading(false);
+    }, (error) => {
+      setAdminDashboardError(`Could not load admin activity: ${error.message}`);
+      setAdminDashboardLoading(false);
+    });
+  }, [adminPanelOpen, isAdmin]);
 
   useEffect(() => {
     let active = true;
     let unsubscribePages: (() => void) | undefined;
     let unsubscribeIndex: (() => void) | undefined;
     let unsubscribeDefinitions: (() => void) | undefined;
+
+    if (firebaseConfigured && !user?.uid) return;
 
     if (firebaseConfigured) {
       unsubscribePages = watchWorkbookPagesInFirestore((storedPages) => {
@@ -157,10 +228,44 @@ export default function Home() {
       unsubscribeIndex?.();
       unsubscribeDefinitions?.();
     };
-  }, []);
+  }, [user?.uid]);
+
+  async function handleLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!auth) return;
+    setLoginError("");
+    setIsLoggingIn(true);
+    try {
+      await signInWithEmailAndPassword(auth, loginEmail.trim(), loginPassword);
+      setLoginPassword("");
+    } catch (error) {
+      setLoginError(`Sign-in failed: ${errorDetails(error)}`);
+    } finally {
+      setIsLoggingIn(false);
+    }
+  }
+
+  async function handleLogout() {
+    if (!auth) return;
+    try {
+      await signOut(auth);
+    } catch (error) {
+      setNotice(`Could not sign out: ${errorDetails(error)}`);
+    }
+  }
+
+  async function logAdminActivity(input: AdminActivityInput): Promise<string> {
+    if (!firebaseConfigured) return "";
+    try {
+      await recordAdminActivity(input);
+      return "";
+    } catch (error) {
+      return ` Activity history could not be saved: ${errorDetails(error)}`;
+    }
+  }
 
   useEffect(() => {
-    if (!firebaseConfigured || !assetsInitialized) return;
+    if (!firebaseConfigured || !user?.uid || !assetsInitialized) return;
     const groups = sheets.filter((sheet) => sheet.kind === "group").map((sheet) => sheet.group ?? sheet.label);
     return watchAssetsInFirestore((storedAssets) => {
       setAssets(storedAssets);
@@ -170,7 +275,7 @@ export default function Home() {
       setCloudStatus("error");
       setNotice(`Firestore sync failed: ${error.message}`);
     }, groups);
-  }, [assetsInitialized, sheets]);
+  }, [assetsInitialized, sheets, user?.uid]);
 
   useEffect(() => {
     if (firebaseConfigured) return;
@@ -263,11 +368,19 @@ export default function Home() {
     const nextRows = indexRows.some((row) => row.id === savedRow.id)
       ? indexRows.map((row) => row.id === savedRow.id ? savedRow : row)
       : [...indexRows, savedRow];
+    const activityAction = indexRows.some((row) => row.id === savedRow.id) ? "edit" : "add";
     setIsSaving(true);
     try {
       await saveIndexRows(nextRows);
       setEditingIndexRow(null);
-      setNotice(firebaseConfigured ? "Index entry saved to Firestore." : "Index entry saved on this device.");
+      const logWarning = await logAdminActivity({
+        action: activityAction,
+        entity: "Index entry",
+        entityId: savedRow.id,
+        description: savedRow.description,
+        changedFields: ["number", "equipmentGroup", "description"],
+      });
+      setNotice(`${firebaseConfigured ? "Index entry saved to Firestore." : "Index entry saved on this device."}${logWarning}`);
     } catch (error) {
       setReferenceFormError(`Index save failed: ${errorDetails(error)}`);
     } finally {
@@ -291,16 +404,27 @@ export default function Home() {
       setReferenceFormError("A definition for that term already exists.");
       return;
     }
-    const savedDefinition = { term, definition };
+    const savedDefinition = { id: editingDefinition.id || crypto.randomUUID(), term, definition };
     const nextRows = editingDefinitionOriginalTerm !== null
       ? definitionRows.map((row) => row.term === editingDefinitionOriginalTerm ? savedDefinition : row)
       : [...definitionRows, savedDefinition];
+    const previousDefinition = definitionRows.find((row) => row.term === editingDefinitionOriginalTerm);
+    const activityAction = editingDefinitionOriginalTerm !== null ? "edit" : "add";
     setIsSaving(true);
     try {
       await saveDefinitions(nextRows);
       setEditingDefinition(null);
       setEditingDefinitionOriginalTerm(null);
-      setNotice(firebaseConfigured ? "Definition saved to Firestore." : "Definition saved on this device.");
+      const logWarning = await logAdminActivity({
+        action: activityAction,
+        entity: "Definition",
+        entityId: savedDefinition.id,
+        description: savedDefinition.term,
+        changedFields: previousDefinition
+          ? (["term", "definition"] as const).filter((field) => previousDefinition[field] !== savedDefinition[field])
+          : ["term", "definition"],
+      });
+      setNotice(`${firebaseConfigured ? "Definition saved to Firestore." : "Definition saved on this device."}${logWarning}`);
     } catch (error) {
       setReferenceFormError(`Definition save failed: ${errorDetails(error)}`);
     } finally {
@@ -313,7 +437,14 @@ export default function Home() {
     setIsSaving(true);
     try {
       await saveIndexRows(indexRows.filter((item) => item.id !== row.id));
-      setNotice(firebaseConfigured ? "Index entry deleted from Firestore." : "Index entry deleted.");
+      const logWarning = await logAdminActivity({
+        action: "delete",
+        entity: "Index entry",
+        entityId: row.id,
+        description: row.description,
+        changedFields: [],
+      });
+      setNotice(`${firebaseConfigured ? "Index entry deleted from Firestore." : "Index entry deleted."}${logWarning}`);
     } catch (error) {
       setNotice(`Index delete failed: ${errorDetails(error)}`);
     } finally {
@@ -326,7 +457,14 @@ export default function Home() {
     setIsSaving(true);
     try {
       await saveDefinitions(definitionRows.filter((item) => item.term !== definition.term));
-      setNotice(firebaseConfigured ? "Definition deleted from Firestore." : "Definition deleted.");
+      const logWarning = await logAdminActivity({
+        action: "delete",
+        entity: "Definition",
+        entityId: definition.id ?? definition.term,
+        description: definition.term,
+        changedFields: [],
+      });
+      setNotice(`${firebaseConfigured ? "Definition deleted from Firestore." : "Definition deleted."}${logWarning}`);
     } catch (error) {
       setNotice(`Definition delete failed: ${errorDetails(error)}`);
     } finally {
@@ -353,7 +491,14 @@ export default function Home() {
       setPage(1);
       setNewPageName("");
       setAddingPage(false);
-      setNotice(firebaseConfigured ? "Page saved to Firestore." : "Page saved on this device.");
+      const logWarning = await logAdminActivity({
+        action: "add",
+        entity: "Workbook page",
+        entityId: sheet.id,
+        description: sheet.label,
+        changedFields: ["label"],
+      });
+      setNotice(`${firebaseConfigured ? "Page saved to Firestore." : "Page saved on this device."}${logWarning}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Firestore could not save the page.";
       setNotice(`Page save failed: ${message}`);
@@ -368,6 +513,13 @@ export default function Home() {
     setIsSaving(true);
     try {
       if (firebaseConfigured) await deleteWorkbookPageFromFirestore(sheet.id);
+      const logWarning = await logAdminActivity({
+        action: "delete",
+        entity: "Workbook page",
+        entityId: sheet.id,
+        description: sheet.label,
+        changedFields: [],
+      });
       setSheets([...defaultSheets, ...customSheets]);
       window.localStorage.setItem(sheetsStorageKey, JSON.stringify(customSheets));
       if (activeSheetId === sheet.id) {
@@ -377,7 +529,7 @@ export default function Home() {
         setLocationFilter("All locations");
         setPhaseFilter("All phases");
       }
-      setNotice(firebaseConfigured ? "Page deleted from Firestore." : "Page deleted from this device.");
+      setNotice(`${firebaseConfigured ? "Page deleted from Firestore." : "Page deleted from this device."}${logWarning}`);
     } catch (error) {
       setNotice(`Page delete failed: ${errorDetails(error)}`);
     } finally {
@@ -498,7 +650,14 @@ export default function Home() {
       setLocationFilter("All locations");
       setPhaseFilter("All phases");
       setPage(1);
-      setNotice(`Imported ${importedRows.length} rows: ${updatedRows} updated, ${newRows} added.`);
+      const logWarning = await logAdminActivity({
+        action: "import",
+        entity: "Equipment",
+        entityId: group,
+        description: `${importedRows.length} rows imported (${updatedRows} updated, ${newRows} added)`,
+        changedFields: [...new Set(importedRows.flatMap((row) => assetFields.filter((field) => row.fields[field])))],
+      });
+      setNotice(`Imported ${importedRows.length} rows: ${updatedRows} updated, ${newRows} added.${logWarning}`);
       setPendingImport(null);
     } catch (error) {
       setNotice(`Excel import failed: ${errorDetails(error)}`);
@@ -525,6 +684,15 @@ export default function Home() {
     try {
       const previousAsset = assets.find((item) => item.id === asset.id);
       if (firebaseConfigured) await saveAssetToFirestore(asset, previousAsset?.equipmentGroup);
+      const logWarning = await logAdminActivity({
+        action: previousAsset ? "edit" : "add",
+        entity: "Equipment",
+        entityId: asset.id,
+        description: asset.equipmentCode || asset.servicedArea || asset.id,
+        changedFields: previousAsset
+          ? assetFields.filter((field) => previousAsset[field] !== asset[field])
+          : assetFields.filter((field) => Boolean(asset[field])),
+      });
       persistLocally(nextAssets);
       setAssets(nextAssets);
       if (isNewAsset) {
@@ -534,7 +702,7 @@ export default function Home() {
         setPage(Math.floor(assets.length / pageSize) + 1);
       }
       setEditingAsset(null);
-      setNotice(firebaseConfigured ? "Changes saved to Firestore." : "Changes saved on this device.");
+      setNotice(`${firebaseConfigured ? "Changes saved to Firestore." : "Changes saved on this device."}${logWarning}`);
     } catch (error) {
       const group = asset.equipmentGroup.trim().replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "Unassigned";
       setNotice(`Save failed for Firestore collection “${group}”: ${errorDetails(error)}`);
@@ -547,10 +715,17 @@ export default function Home() {
     if (!window.confirm(`Delete ${asset.equipmentCode || "this asset"}? This cannot be undone.`)) return;
     try {
       if (firebaseConfigured) await deleteAssetFromFirestore(asset);
+      const logWarning = await logAdminActivity({
+        action: "delete",
+        entity: "Equipment",
+        entityId: asset.id,
+        description: asset.equipmentCode || asset.servicedArea || asset.id,
+        changedFields: [],
+      });
       const nextAssets = assets.filter((item) => item.id !== asset.id);
       persistLocally(nextAssets);
       setAssets(nextAssets);
-      setNotice("Asset removed from the register.");
+      setNotice(`Asset removed from the register.${logWarning}`);
     } catch (error) {
       const group = asset.equipmentGroup.trim().replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "Unassigned";
       setNotice(`Delete failed for Firestore collection “${group}”: ${errorDetails(error)}`);
@@ -562,14 +737,43 @@ export default function Home() {
     const nextAssets = assets.map((item) => item.id === asset.id ? updatedAsset : item);
     try {
       if (firebaseConfigured) await saveAssetToFirestore(updatedAsset);
+      const logWarning = await logAdminActivity({
+        action: "edit",
+        entity: "Equipment",
+        entityId: asset.id,
+        description: asset.equipmentCode || asset.servicedArea || asset.id,
+        changedFields: ["remarksColor"],
+      });
       persistLocally(nextAssets);
       setAssets(nextAssets);
+      if (logWarning) setNotice(logWarning.trim());
     } catch (error) {
       setNotice(`Could not save the Remarks color: ${errorDetails(error)}`);
     }
   }
 
   const fanCoilCount = assets.filter((asset) => asset.equipmentType === "Fan Coil Unit").length;
+
+  if (firebaseConfigured && authLoading) {
+    return <main className="auth-screen"><section className="auth-card" aria-live="polite"><span className="auth-kicker">MEPF / FACILITIES</span><h1>Checking your account</h1><p>Please wait while we verify your sign-in.</p></section></main>;
+  }
+
+  if (firebaseConfigured && !user) {
+    return <main className="auth-screen">
+      <section className="auth-card">
+        <span className="auth-kicker">MEPF / FACILITIES</span>
+        <h1>Sign in</h1>
+        <p>Use your authorized work email and password to access the asset register.</p>
+        <form className="auth-form" onSubmit={(event) => void handleLogin(event)}>
+          <label className="form-field"><span>Email</span><input type="email" autoComplete="username" value={loginEmail} onChange={(event) => setLoginEmail(event.target.value)} required /></label>
+          <label className="form-field"><span>Password</span><input type="password" autoComplete="current-password" value={loginPassword} onChange={(event) => setLoginPassword(event.target.value)} required /></label>
+          {loginError && <p className="auth-error" role="alert">{loginError}</p>}
+          <button className="primary-button auth-submit" type="submit" disabled={isLoggingIn}>{isLoggingIn ? "Signing in..." : "Sign in"}</button>
+        </form>
+        <p className="auth-footnote">Accounts are provisioned by your administrator. Contact them if you need access.</p>
+      </section>
+    </main>;
+  }
 
   return (
     <main className="app-shell">
@@ -579,9 +783,54 @@ export default function Home() {
         </a>
         <div className="topbar-right">
           <span className={`connection-state ${cloudStatus === "connected" ? "is-cloud" : "is-local"}`}><span className="state-dot" />{cloudStatus === "connected" ? "Cloud connected" : cloudStatus === "connecting" ? "Connecting..." : cloudStatus === "error" ? "Cloud sync error" : "Local workspace"}</span>
+          {user && <><span className="account-chip">{user.email} · {isAdmin ? "Admin" : "User"}</span><button className="sign-out-button" onClick={() => void handleLogout()} aria-label="Sign out" title="Sign out"><LogOut size={15} /></button></>}
+          {isAdmin && <button className="sign-out-button admin-menu-button" onClick={() => { setAdminDashboardLoading(true); setAdminDashboardError(""); setAdminPanelOpen(true); }} aria-label="Open admin menu" title="Admin users and activity"><Menu size={18} /></button>}
           <span className="year-chip">2022 <span>/</span> WMHC</span>
         </div>
       </header>
+
+      {isAdmin && adminPanelOpen && typeof document !== "undefined" && createPortal(<div className="admin-drawer-backdrop" style={{ position: "fixed", zIndex: 1000, inset: 0, display: "flex", justifyContent: "flex-end", background: "rgb(23 38 30 / 40%)" }} onMouseDown={(event) => { if (event.target === event.currentTarget) setAdminPanelOpen(false); }}>
+        <aside className="admin-drawer" style={{ width: "min(520px, 100vw)", height: "100dvh", display: "flex", flexDirection: "column", background: "#f8faf8", boxShadow: "-12px 0 35px rgb(20 40 29 / 18%)" }} role="dialog" aria-modal="true" aria-labelledby="admin-drawer-title">
+          <header className="admin-drawer-header">
+            <div><span className="modal-kicker">ADMINISTRATION</span><h2 id="admin-drawer-title"><ShieldCheck size={19} /> Users & activity</h2></div>
+            <button className="icon-button modal-close" onClick={() => setAdminPanelOpen(false)} aria-label="Close admin menu"><X size={18} /></button>
+          </header>
+          <div className="admin-drawer-content">
+            <section className="admin-dashboard-section">
+              <div className="admin-section-heading"><h3><Users size={16} /> App users</h3><span>{adminUsers.length}</span></div>
+              <p className="admin-help-text">People who have signed into this app. New users appear after their first sign-in. Roles are managed in Firebase Console / Cloud Shell.</p>
+              {adminDashboardLoading && <p className="admin-empty">Loading users and activity...</p>}
+              {!adminDashboardLoading && adminUsers.length === 0 && <p className="admin-empty">No app user profiles yet.</p>}
+              {adminUsers.length > 0 && <div className="admin-user-list">
+                {adminUsers.map((adminUser) => <article className="admin-user-row" key={adminUser.uid}>
+                  <span className="admin-user-avatar">{(adminUser.email[0] ?? "?").toUpperCase()}</span>
+                  <span className="admin-user-details"><strong>{adminUser.email || "Email unavailable"}</strong><small>Last seen {adminUser.lastSeen.toLocaleString()}</small></span>
+                  <span className={`admin-role-badge ${adminUser.isAdmin ? "is-admin" : ""}`}>{adminUser.isAdmin ? "Admin" : "User"}</span>
+                </article>)}
+              </div>}
+            </section>
+
+            <section className="admin-dashboard-section activity-section">
+              <div className="admin-section-heading"><h3><History size={16} /> Recent activity</h3><span>Latest 100</span></div>
+              <p className="admin-help-text">Changes made in the app after this feature was enabled. Field names are recorded; field values are not.</p>
+              {!adminDashboardLoading && adminActivities.length === 0 && <p className="admin-empty">No app activity has been recorded yet.</p>}
+              {adminActivities.length > 0 && <div className="admin-activity-list">
+                {adminActivities.map((activity) => <article className="admin-activity-row" key={activity.id}>
+                  <span className={`activity-action activity-${activity.action}`}>{activity.action}</span>
+                  <div className="admin-activity-details">
+                    <strong>{activity.actorEmail || "Unknown user"} <span>{activity.action === "add" ? "added" : activity.action === "edit" ? "edited" : activity.action === "delete" ? "deleted" : "imported"}</span> {activity.entity}</strong>
+                    <p>{activity.description}</p>
+                    {activity.changedFields.length > 0 && <small>Fields: {activity.changedFields.join(", ")}</small>}
+                    <small>{activity.createdAt.toLocaleString()}</small>
+                  </div>
+                </article>)}
+              </div>}
+              {adminDashboardError && <p className="admin-dashboard-error" role="alert">{adminDashboardError} Ensure the latest <code>firestore.rules</code> have been published.</p>}
+              <p className="admin-help-text admin-audit-note">This app activity log is for visibility, not a tamper-proof security audit.</p>
+            </section>
+          </div>
+        </aside>
+      </div>, document.body)}
 
       <nav className="workbook-nav" aria-label="Workbook pages">
         <div className="sheet-tabs" role="tablist" aria-label="Worksheets">
@@ -610,7 +859,7 @@ export default function Home() {
             <p className="page-subtitle">{activeSheet.kind === "terms" ? "Reference guide for MEPF equipment terms and condition ratings" : activeSheet.kind === "life" ? "Service life and replacement planning by equipment" : activeSheet.kind === "group" ? `Equipment records for ${activeSheet.group ?? activeSheet.label}` : "Equipment groups and descriptions"}</p>
           </div>
           <div className="page-heading-actions">
-            {!defaultSheets.some((sheet) => sheet.id === activeSheet.id) && <button className="delete-page-button" onClick={() => void deleteWorkbookPage(activeSheet)} disabled={isSaving}><Trash2 size={15} /> Delete page</button>}
+            {isAdmin && !defaultSheets.some((sheet) => sheet.id === activeSheet.id) && <button className="delete-page-button" onClick={() => void deleteWorkbookPage(activeSheet)} disabled={isSaving}><Trash2 size={15} /> Delete page</button>}
             {activeSheet.kind === "group" && <>
               <button className="icon-button excel-template-button" onClick={() => void downloadExcelTemplate()} disabled={isSaving || (firebaseConfigured && cloudStatus !== "connected")} title="Download Excel template"><ArrowDownToLine size={16} /> Template</button>
               <button className="icon-button excel-upload-button" onClick={() => importFileInput.current?.click()} disabled={isSaving || (firebaseConfigured && cloudStatus !== "connected")} title="Upload completed Excel workbook"><Upload size={16} /> Upload Excel</button>
@@ -635,14 +884,14 @@ export default function Home() {
           <section className="reference-sheet" aria-label="Definitions">
             <table className="reference-table">
               <thead><tr><th>TERM</th><th>DEFINITION</th><th className="reference-action-heading">ACTIONS</th></tr></thead>
-              <tbody>{definitionRows.map((item) => <tr key={item.term}><th scope="row">{item.term}</th><td>{item.definition}</td><td className="reference-actions"><button className="row-icon-button" onClick={() => { setReferenceFormError(""); setEditingDefinition({ ...item }); setEditingDefinitionOriginalTerm(item.term); }} disabled={isSaving} aria-label={`Edit ${item.term}`} title="Edit definition"><Pencil size={14} /></button><button className="row-icon-button delete-action" onClick={() => void deleteDefinition(item)} disabled={isSaving} aria-label={`Delete ${item.term}`} title="Delete definition"><Trash2 size={14} /></button></td></tr>)}</tbody>
+              <tbody>{definitionRows.map((item) => <tr key={item.id ?? item.term}><th scope="row">{item.term}</th><td>{item.definition}</td><td className="reference-actions"><button className="row-icon-button" onClick={() => { setReferenceFormError(""); setEditingDefinition({ ...item }); setEditingDefinitionOriginalTerm(item.term); }} disabled={isSaving} aria-label={`Edit ${item.term}`} title="Edit definition"><Pencil size={14} /></button>{isAdmin && <button className="row-icon-button delete-action" onClick={() => void deleteDefinition(item)} disabled={isSaving} aria-label={`Delete ${item.term}`} title="Delete definition"><Trash2 size={14} /></button>}</td></tr>)}</tbody>
             </table>
           </section>
         ) : activeSheet.kind === "life" ? (
           <section className="reference-sheet" aria-label="MEPF life expectancy">
             <table className="reference-table life-table">
               <thead><tr><th>EQUIPMENT CODE</th><th>SERVICED AREA</th><th>INSTALLATION YEAR</th><th>NORMAL LIFE</th><th>PRESENT CONDITION</th><th>ADJUSTED LIFE</th><th>REPLACEMENT YEAR</th><th className="reference-action-heading">ACTIONS</th></tr></thead>
-              <tbody>{filteredAssets.map((asset) => <tr key={asset.id}><td>{asset.equipmentCode || "—"}</td><td>{asset.servicedArea || "—"}</td><td>{asset.installationYear || "—"}</td><td>{asset.normalLife || "—"}</td><td>{asset.presentCondition || "—"}</td><td>{asset.adjustedLife || "—"}</td><td>{asset.replacementYear || "—"}</td><td className="reference-actions"><button className="row-icon-button" onClick={() => setEditingAsset({ ...asset })} disabled={isSaving} aria-label={`Edit ${asset.equipmentCode || asset.servicedArea}`} title="Edit equipment"><Pencil size={14} /></button><button className="row-icon-button delete-action" onClick={() => void handleDelete(asset)} disabled={isSaving} aria-label={`Delete ${asset.equipmentCode || asset.servicedArea}`} title="Delete equipment"><Trash2 size={14} /></button></td></tr>)}</tbody>
+              <tbody>{filteredAssets.map((asset) => <tr key={asset.id}><td>{asset.equipmentCode || "—"}</td><td>{asset.servicedArea || "—"}</td><td>{asset.installationYear || "—"}</td><td>{asset.normalLife || "—"}</td><td>{asset.presentCondition || "—"}</td><td>{asset.adjustedLife || "—"}</td><td>{asset.replacementYear || "—"}</td><td className="reference-actions"><button className="row-icon-button" onClick={() => setEditingAsset({ ...asset })} disabled={isSaving} aria-label={`Edit ${asset.equipmentCode || asset.servicedArea}`} title="Edit equipment"><Pencil size={14} /></button>{isAdmin && <button className="row-icon-button delete-action" onClick={() => void handleDelete(asset)} disabled={isSaving} aria-label={`Delete ${asset.equipmentCode || asset.servicedArea}`} title="Delete equipment"><Trash2 size={14} /></button>}</td></tr>)}</tbody>
             </table>
             {filteredAssets.length === 0 && <p className="reference-empty">No assets are available for life expectancy planning.</p>}
           </section>
@@ -650,7 +899,7 @@ export default function Home() {
           <section className="reference-sheet" aria-label="Equipment group index">
             <table className="reference-table index-table">
               <thead><tr><th>NO.</th><th>EQPT GROUP</th><th>DESCRIPTION</th><th className="reference-action-heading">ACTIONS</th></tr></thead>
-              <tbody>{indexRows.map((row) => <tr key={row.id}><td className="index-number">{row.number}</td><td className="index-group">{row.equipmentGroup}</td><td>{row.description}</td><td className="reference-actions"><button className="row-icon-button" onClick={() => { setReferenceFormError(""); setEditingIndexRow({ ...row }); }} disabled={isSaving} aria-label={`Edit ${row.description}`} title="Edit index row"><Pencil size={14} /></button><button className="row-icon-button delete-action" onClick={() => void deleteIndexRow(row)} disabled={isSaving} aria-label={`Delete ${row.description}`} title="Delete index row"><Trash2 size={14} /></button></td></tr>)}</tbody>
+              <tbody>{indexRows.map((row) => <tr key={row.id}><td className="index-number">{row.number}</td><td className="index-group">{row.equipmentGroup}</td><td>{row.description}</td><td className="reference-actions"><button className="row-icon-button" onClick={() => { setReferenceFormError(""); setEditingIndexRow({ ...row }); }} disabled={isSaving} aria-label={`Edit ${row.description}`} title="Edit index row"><Pencil size={14} /></button>{isAdmin && <button className="row-icon-button delete-action" onClick={() => void deleteIndexRow(row)} disabled={isSaving} aria-label={`Delete ${row.description}`} title="Delete index row"><Trash2 size={14} /></button>}</td></tr>)}</tbody>
             </table>
           </section>
         ) : <>
@@ -674,6 +923,15 @@ export default function Home() {
 
           <div className="table-scroll">
             <table className="asset-table">
+              <colgroup>
+                <col style={{ width: "5%" }} /><col style={{ width: "6%" }} /><col style={{ width: "3%" }} />
+                <col style={{ width: "6%" }} /><col style={{ width: "7%" }} /><col style={{ width: "4%" }} />
+                <col style={{ width: "9%" }} /><col style={{ width: "4%" }} /><col style={{ width: "4%" }} />
+                <col style={{ width: "6%" }} /><col style={{ width: "5%" }} /><col style={{ width: "4.5%" }} />
+                <col style={{ width: "6%" }} /><col style={{ width: "4.5%" }} /><col style={{ width: "6%" }} />
+                <col style={{ width: "4%" }} /><col style={{ width: "4.5%" }} /><col style={{ width: "7%" }} />
+                <col style={{ width: "4.5%" }} />
+              </colgroup>
               <thead>
                 <tr className="group-row">
                   <th rowSpan={2}>EQPT GROUP</th><th rowSpan={2}>EQPT TYPE</th><th rowSpan={2}>EQPT TAG</th><th rowSpan={2}>EQPT LOCATION</th><th rowSpan={2}>SERVICED AREA</th><th rowSpan={2}>SEQUENCE NO.</th><th rowSpan={2}>EQPT CODE</th><th rowSpan={2}>BRAND</th><th rowSpan={2}>CAPACITY</th><th rowSpan={2}>HOTEL ASSET CODE</th><th rowSpan={2}>INSTALLATION YEAR</th><th colSpan={3} className="life-group">LIFE EXPECTANCY</th><th rowSpan={2}>REPLACEMENT YEAR</th><th rowSpan={2}>ZONING</th><th rowSpan={2}>PHASING</th><th rowSpan={2} className="remarks-heading">REMARKS</th><th rowSpan={2} className="action-heading"><span className="sr-only">Actions</span></th>
@@ -684,7 +942,7 @@ export default function Home() {
                 {visibleAssets.map((asset, index) => (
                   <tr key={asset.id}>
                     <td><span className="group-tag">{asset.equipmentGroup || "—"}</span></td><td>{asset.equipmentType || "—"}</td><td className="center-cell">{asset.equipmentTag || "—"}</td><td>{asset.equipmentLocation || "—"}</td><td>{asset.servicedArea || "—"}</td><td className="center-cell">{asset.sequenceNumber || "—"}</td><td className="code-cell">{asset.equipmentCode || "—"}</td><td>{asset.brand || "—"}</td><td className="center-cell">{asset.capacity || "—"}</td><td className="center-cell">{asset.hotelAssetCode || "—"}</td><td className="center-cell">{asset.installationYear || "—"}</td><td className="center-cell">{asset.normalLife || "—"}</td><td className="center-cell">{asset.presentCondition || "—"}</td><td className="center-cell">{asset.adjustedLife || "—"}</td><td className="center-cell">{asset.replacementYear || "—"}</td><td className="center-cell"><span className="zone-tag">{asset.zoning || "—"}</span></td><td className="center-cell">{asset.phasing || "—"}</td><td className={`remarks-cell remarks-${asset.remarksColor || "none"}`}><span>{asset.remarks}</span><select aria-label={`Remarks color for ${asset.equipmentCode || asset.servicedArea}`} value={asset.remarksColor ?? ""} onChange={(event) => void handleRemarksColorChange(asset, event.target.value as "" | "red" | "green")}><option value="">No color</option><option value="red">Red</option><option value="green">Green</option></select></td>
-                    <td className="row-actions"><button className="row-icon-button" onClick={() => setEditingAsset({ ...asset })} aria-label={`Edit ${asset.equipmentCode || `asset ${index + 1}`}`} title="Edit asset"><Pencil size={14} /></button><button className="row-icon-button delete-action" onClick={() => void handleDelete(asset)} aria-label={`Delete ${asset.equipmentCode || `asset ${index + 1}`}`} title="Delete asset"><Trash2 size={14} /></button></td>
+                    <td className="row-actions"><button className="row-icon-button" onClick={() => setEditingAsset({ ...asset })} aria-label={`Edit ${asset.equipmentCode || `asset ${index + 1}`}`} title="Edit asset"><Pencil size={14} /></button>{isAdmin && <button className="row-icon-button delete-action" onClick={() => void handleDelete(asset)} aria-label={`Delete ${asset.equipmentCode || `asset ${index + 1}`}`} title="Delete asset"><Trash2 size={14} /></button>}</td>
                   </tr>
                 ))}
                 {visibleAssets.length === 0 && <tr><td className="empty-state" colSpan={19}>No equipment matches these filters.</td></tr>}
@@ -748,7 +1006,7 @@ export default function Home() {
         <section className="asset-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
           <header className="modal-header"><div><span className="modal-kicker">ASSET REGISTER</span><h2 id="modal-title">{editingAsset.id ? "Edit equipment" : "Add equipment"}</h2></div><button className="icon-button modal-close" onClick={() => setEditingAsset(null)} aria-label="Close dialog"><X size={18} /></button></header>
           <form onSubmit={(event) => void handleSave(event)}>
-            <div className="form-grid">{assetFields.map((field) => <label className={`form-field ${field === "equipmentCode" || field === "servicedArea" ? "field-wide" : ""}`} key={field}><span>{fieldLabels[field]}</span><input autoFocus={field === "equipmentGroup" && !editingAsset.id} value={editingAsset[field]} onChange={(event) => setEditingAsset({ ...editingAsset, [field]: event.target.value })} placeholder={field === "equipmentCode" ? "e.g. HVAC-4-FCU-BMT-Guest Entrance-1" : "Enter value"} /></label>)}</div>
+            <div className="form-grid">{assetFields.map((field) => <label className={`form-field ${field === "equipmentCode" || field === "servicedArea" ? "field-wide" : ""}`} key={field}><span>{fieldLabels[field]}</span><input autoFocus={field === "equipmentGroup" && !editingAsset.id} disabled={field === "equipmentGroup" && Boolean(editingAsset.id) && !isAdmin} value={editingAsset[field]} onChange={(event) => setEditingAsset({ ...editingAsset, [field]: event.target.value })} placeholder={field === "equipmentCode" ? "e.g. HVAC-4-FCU-BMT-Guest Entrance-1" : "Enter value"} /></label>)}</div>
             <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setEditingAsset(null)} disabled={isSaving}>Cancel</button><button type="submit" className="primary-button" disabled={isSaving}>{isSaving ? "Saving..." : <><Check size={16} /> Save equipment</>}</button></footer>
           </form>
         </section>

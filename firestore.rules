@@ -1,0 +1,96 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn() && request.auth.token.admin == true;
+    }
+
+    match /workbookPages/{pageId} {
+      allow read, create, update: if signedIn();
+      allow delete: if isAdmin();
+    }
+
+    match /adminUsers/{userId} {
+      allow get: if signedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if signedIn()
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasAll(['uid', 'email', 'isAdmin', 'lastSeen'])
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'isAdmin', 'lastSeen'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.isAdmin == isAdmin()
+        && request.resource.data.lastSeen == request.time;
+    }
+
+    match /adminActivity/{activityId} {
+      allow get, list: if isAdmin();
+      allow create: if signedIn()
+        && request.resource.data.keys().hasAll([
+          'actorUid', 'actorEmail', 'action', 'entity', 'entityId',
+          'description', 'changedFields', 'createdAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'actorUid', 'actorEmail', 'action', 'entity', 'entityId',
+          'description', 'changedFields', 'createdAt'
+        ])
+        && request.resource.data.actorUid == request.auth.uid
+        && request.resource.data.actorEmail == request.auth.token.email
+        && request.resource.data.action in ['add', 'edit', 'delete', 'import']
+        && request.resource.data.entity in ['Equipment', 'Index entry', 'Definition', 'Workbook page']
+        && request.resource.data.entityId is string
+        && request.resource.data.entityId.size() <= 150
+        && request.resource.data.description is string
+        && request.resource.data.description.size() <= 200
+        && request.resource.data.changedFields is list
+        && request.resource.data.changedFields.size() <= 20
+        && request.resource.data.createdAt == request.time;
+    }
+
+    match /system/{documentId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && (
+          (documentId == 'assets-initialized'
+            && request.resource.data.keys().hasOnly(['initialized']))
+          || (documentId in ['reference-index', 'reference-definitions']
+            && request.resource.data.keys().hasOnly(['migrationComplete'])
+            && request.resource.data.migrationComplete == true)
+        );
+      allow update: if signedIn()
+        && (
+          (documentId == 'assets-initialized'
+            && request.resource.data.keys().hasOnly(['initialized']))
+          || (documentId in ['reference-index', 'reference-definitions']
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['migrationComplete'])
+            && request.resource.data.migrationComplete == true)
+        );
+      allow delete: if isAdmin();
+
+      match /entries/{entryId} {
+        allow read, create, update: if signedIn();
+        allow delete: if isAdmin();
+      }
+    }
+
+    match /{group}/{assetId} {
+      allow read, create, update: if signedIn()
+        && group != 'system'
+        && group != 'workbookPages'
+        && group != 'adminUsers'
+        && group != 'adminActivity'
+        && group.matches('^[A-Za-z0-9_-]+$');
+      allow delete: if isAdmin()
+        && group != 'system'
+        && group != 'workbookPages'
+        && group != 'adminUsers'
+        && group != 'adminActivity'
+        && group.matches('^[A-Za-z0-9_-]+$');
+    }
+  }
+}

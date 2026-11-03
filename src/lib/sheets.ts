@@ -17,6 +17,7 @@ export const defaultSheets: WorkbookSheet[] = [
 ];
 
 export type TermDefinition = {
+  id?: string;
   term: string;
   definition: string;
 };
