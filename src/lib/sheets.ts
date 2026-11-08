@@ -1,8 +1,15 @@
+import type { AssetField } from "@/lib/assets";
+
+export type WorkbookColumn =
+  | { id: string; label: string; field: AssetField }
+  | { id: string; label: string; customFieldId: string };
+
 export type WorkbookSheet = {
   id: string;
   label: string;
   kind: "index" | "life" | "terms" | "group";
   group?: string;
+  columns?: WorkbookColumn[];
 };
 
 export const defaultSheets: WorkbookSheet[] = [

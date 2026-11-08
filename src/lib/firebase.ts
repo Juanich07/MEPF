@@ -8,13 +8,13 @@ import {
   getDoc,
   getFirestore,
   getDocs,
-  limit,
   onSnapshot,
   orderBy,
   query,
   serverTimestamp,
   setDoc,
   Timestamp,
+  where,
   writeBatch,
 } from "firebase/firestore";
 import { demoAssets, type Asset } from "@/lib/assets";
@@ -259,23 +259,15 @@ export async function recordAdminActivity(input: AdminActivityInput): Promise<vo
 }
 
 export function watchAdminDashboard(
-  onData: (users: AdminUserProfile[], activities: AdminActivity[]) => void,
+  onUsers: (users: AdminUserProfile[]) => void,
   onError: (error: Error) => void,
 ) {
   if (!database) throw new Error("Firebase is not configured.");
-  let users: AdminUserProfile[] = [];
-  let activities: AdminActivity[] = [];
-  let usersLoaded = false;
-  let activitiesLoaded = false;
-
-  const notify = () => {
-    if (usersLoaded && activitiesLoaded) onData(users, activities);
-  };
-  const unsubscribeUsers = onSnapshot(
+  return onSnapshot(
     query(adminUsersCollection(), orderBy("lastSeen", "desc")),
     (snapshot) => {
       try {
-        users = snapshot.docs.map((userDocument) => {
+        const users = snapshot.docs.map((userDocument) => {
           const data = userDocument.data();
           if (typeof data.email !== "string" || typeof data.isAdmin !== "boolean" || !(data.lastSeen instanceof Timestamp)) {
             throw new Error(`User profile "${userDocument.id}" is invalid.`);
@@ -287,19 +279,26 @@ export function watchAdminDashboard(
             lastSeen: data.lastSeen.toDate(),
           };
         });
-        usersLoaded = true;
-        notify();
+        onUsers(users);
       } catch (error) {
         onError(error instanceof Error ? error : new Error(String(error)));
       }
     },
     onError,
   );
-  const unsubscribeActivities = onSnapshot(
-    query(adminActivityCollection(), orderBy("createdAt", "desc"), limit(100)),
+}
+
+export function watchAdminActivitiesForUser(
+  userId: string,
+  onActivities: (activities: AdminActivity[]) => void,
+  onError: (error: Error) => void,
+) {
+  if (!database) throw new Error("Firebase is not configured.");
+  return onSnapshot(
+    query(adminActivityCollection(), where("actorUid", "==", userId)),
     (snapshot) => {
       try {
-        activities = snapshot.docs.map((activityDocument) => {
+        const activities = snapshot.docs.map((activityDocument) => {
           const data = activityDocument.data();
           if (
             typeof data.actorUid !== "string"
@@ -325,18 +324,14 @@ export function watchAdminDashboard(
             createdAt: data.createdAt.toDate(),
           };
         });
-        activitiesLoaded = true;
-        notify();
+        activities.sort((first, second) => second.createdAt.getTime() - first.createdAt.getTime());
+        onActivities(activities);
       } catch (error) {
         onError(error instanceof Error ? error : new Error(String(error)));
       }
     },
     onError,
   );
-  return () => {
-    unsubscribeUsers();
-    unsubscribeActivities();
-  };
 }
 
 function referenceEntriesCollection(id: string) {

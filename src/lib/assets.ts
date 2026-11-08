@@ -25,6 +25,28 @@ export type Asset = Record<AssetField, string> & {
   id: string;
   sortOrder?: number;
   remarksColor?: RemarksColor;
+  customFields?: Record<string, string>;
+};
+
+export const assetColumnLabels: Record<AssetField, string> = {
+  equipmentGroup: "EQPT GROUP",
+  equipmentType: "EQPT TYPE",
+  equipmentTag: "EQPT TAG",
+  equipmentLocation: "EQPT LOCATION",
+  servicedArea: "SERVICED AREA",
+  sequenceNumber: "SEQUENCE NO.",
+  equipmentCode: "EQPT CODE",
+  brand: "BRAND",
+  capacity: "CAPACITY",
+  hotelAssetCode: "HOTEL ASSET CODE",
+  installationYear: "INSTALLATION YEAR",
+  normalLife: "NORMAL",
+  presentCondition: "PRESENT CONDITION",
+  adjustedLife: "ADJUSTED",
+  replacementYear: "REPLACEMENT YEAR",
+  zoning: "ZONING",
+  phasing: "PHASING",
+  remarks: "REMARKS",
 };
 
 function makeAsset(

@@ -1,31 +1,13 @@
 import * as XLSX from "@e965/xlsx";
-import { assetFields, type Asset, type AssetField } from "@/lib/assets";
+import { assetColumnLabels, type Asset, type AssetField } from "@/lib/assets";
+import type { WorkbookColumn } from "@/lib/sheets";
+import type { Row } from "write-excel-file/browser";
 
 export type ImportedAssetRow = {
   id: string;
-  fields: Record<AssetField, string>;
+  fields: Partial<Record<AssetField, string>>;
+  customFields: Record<string, string>;
   sourceRow: number;
-};
-
-const excelFieldLabels: Record<AssetField, string> = {
-  equipmentGroup: "EQPT GROUP",
-  equipmentType: "EQPT TYPE",
-  equipmentTag: "EQPT TAG",
-  equipmentLocation: "EQPT LOCATION",
-  servicedArea: "SERVICED AREA",
-  sequenceNumber: "SEQUENCE NO.",
-  equipmentCode: "EQPT CODE",
-  brand: "BRAND",
-  capacity: "CAPACITY",
-  hotelAssetCode: "HOTEL ASSET CODE",
-  installationYear: "INSTALLATION YEAR",
-  normalLife: "NORMAL",
-  presentCondition: "PRESENT CONDITION",
-  adjustedLife: "ADJUSTED",
-  replacementYear: "REPLACEMENT YEAR",
-  zoning: "ZONING",
-  phasing: "PHASING",
-  remarks: "REMARKS",
 };
 
 function cellText(value: unknown): string {
@@ -34,9 +16,28 @@ function cellText(value: unknown): string {
   return String(value).trim();
 }
 
+function getColumnValue(asset: Asset, column: WorkbookColumn): string {
+  return "field" in column
+    ? asset[column.field]
+    : asset.customFields?.[column.customFieldId] ?? "";
+}
+
+function getColumnGroups(columns: WorkbookColumn[]) {
+  const lifeFields: AssetField[] = ["normalLife", "presentCondition", "adjustedLife"];
+  const groups: { columns: WorkbookColumn[]; isLife: boolean }[] = [];
+  for (const column of columns) {
+    const isLife = "field" in column && lifeFields.includes(column.field);
+    const lastGroup = groups.at(-1);
+    if (isLife && lastGroup?.isLife) lastGroup.columns.push(column);
+    else groups.push({ columns: [column], isLife });
+  }
+  return groups;
+}
+
 export async function downloadAssetTemplate(
   group: string,
   assets: Asset[],
+  columns: WorkbookColumn[],
 ): Promise<void> {
   const fileGroup = group.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "equipment";
   const { default: writeXlsxFile } = await import("write-excel-file/browser");
@@ -68,69 +69,55 @@ export async function downloadAssetTemplate(
     backgroundColor: "#F3F6F3",
     textColor: "#708078",
   };
-  const blankRows = Array.from({ length: 20 }, () =>
-    Array.from({ length: assetFields.length + 1 }, () => ({ value: "", ...bodyStyle })),
+  const columnGroups = getColumnGroups(columns);
+  const hasLifeGroup = columnGroups.some((columnGroup) => columnGroup.isLife);
+  const blankRows: Row[] = Array.from({ length: 20 }, () =>
+    Array.from({ length: columns.length + 1 }, (): Row[number] => ({ value: "", ...bodyStyle })),
   );
-  const assetsData = [
-    [
-      { value: "Record ID", rowSpan: 2, ...headerStyle },
-      ...assetFields.slice(0, 11).map((field) => ({
-        value: excelFieldLabels[field],
-        rowSpan: 2,
-        ...headerStyle,
-      })),
-      { value: "LIFE EXPECTANCY", columnSpan: 3, ...lifeHeaderStyle },
-      null,
-      null,
-      ...assetFields.slice(14).map((field) => ({
-        value: excelFieldLabels[field],
-        rowSpan: 2,
-        ...headerStyle,
-      })),
-    ],
-    [
-      ...Array.from({ length: 12 }, () => null),
-      ...assetFields.slice(11, 14).map((field) => ({
-        value: excelFieldLabels[field],
-        ...headerStyle,
-      })),
-      null,
-      null,
-      null,
-      null,
-    ],
-    ...assets.map((asset) => [
-      { value: asset.id, ...recordIdStyle },
-      ...assetFields.map((field) => ({ value: asset[field], ...bodyStyle })),
-    ]),
-    ...blankRows,
+  const headerRow: Row = [
+    { value: "Record ID", ...(hasLifeGroup ? { rowSpan: 2 } : {}), ...headerStyle },
   ];
+  for (const columnGroup of columnGroups) {
+    if (columnGroup.isLife) {
+      headerRow.push(
+        { value: "LIFE EXPECTANCY", columnSpan: columnGroup.columns.length, ...lifeHeaderStyle },
+        ...Array.from({ length: columnGroup.columns.length - 1 }, () => null),
+      );
+    } else {
+      headerRow.push({
+        value: columnGroup.columns[0].label,
+        ...(hasLifeGroup ? { rowSpan: 2 } : {}),
+        ...headerStyle,
+      });
+    }
+  }
+  const assetsData: Row[] = [headerRow];
+  if (hasLifeGroup) {
+    const subheaderRow: Row = [null];
+    for (const columnGroup of columnGroups) {
+      if (columnGroup.isLife) {
+        subheaderRow.push(...columnGroup.columns.map((column) => ({ value: column.label, ...headerStyle })));
+      } else {
+        subheaderRow.push(null);
+      }
+    }
+    assetsData.push(subheaderRow);
+  }
+  assetsData.push(...assets.map((asset) => [
+    { value: asset.id, ...recordIdStyle },
+    ...columns.map((column) => ({ value: getColumnValue(asset, column), ...bodyStyle })),
+  ]));
+  assetsData.push(...blankRows);
 
   await writeXlsxFile([
     {
       sheet: "Assets",
       orientation: "landscape",
       showGridLines: false,
-      stickyRowsCount: 2,
+      stickyRowsCount: hasLifeGroup ? 2 : 1,
       columns: [
         { width: 1 },
-        { width: 17 },
-        { width: 21 },
-        { width: 14 },
-        { width: 21 },
-        { width: 15 },
-        { width: 15 },
-        { width: 28 },
-        { width: 17 },
-        { width: 17 },
-        { width: 15 },
-        { width: 21 },
-        { width: 17 },
-        { width: 21 },
-        { width: 20 },
-        { width: 13 },
-        { width: 16 },
-        { width: 24 },
+        ...columns.map((column) => ({ width: Math.min(32, Math.max(12, column.label.length + 3)) })),
       ],
       data: assetsData,
     },
@@ -140,7 +127,7 @@ export async function downloadAssetTemplate(
       stickyRowsCount: 1,
       data: [
         [{ value: "MEPF equipment import", ...lifeHeaderStyle }],
-        ["The Assets sheet uses the same column layout as the equipment register."],
+        ["The Assets sheet uses the same configured columns as the equipment register."],
         ["Fill in the blank rows to add equipment, or edit existing rows to update them."],
         ["The template includes a hidden Record ID to match existing rows. Leave it unchanged; new blank rows are added as equipment."],
         ["Blank rows are ignored. Uploading does not delete records that are missing from the workbook."],
@@ -170,6 +157,7 @@ export async function downloadAssetTemplate(
 export function parseAssetWorkbook(
   data: ArrayBuffer,
   fieldLabels: Record<AssetField, string>,
+  columns: WorkbookColumn[],
 ): ImportedAssetRow[] {
   const workbook = XLSX.read(data, { type: "array", cellDates: true });
   const sheet = workbook.Sheets.Assets;
@@ -189,8 +177,13 @@ export function parseAssetWorkbook(
         ? nextRow[columnIndex] || header
         : header,
     );
-    return assetFields.every((field) => {
-      const aliases = [excelFieldLabels[field], fieldLabels[field]].map((header) => header.toLowerCase());
+    return columns.every((column) => {
+      const aliases = [
+        column.label,
+        ...("field" in column
+          ? [assetColumnLabels[column.field], fieldLabels[column.field]]
+          : []),
+      ].map((header) => header.toLowerCase());
       return combinedHeaders.some((header) => aliases.includes(header.toLowerCase()));
     });
   });
@@ -229,15 +222,24 @@ export function parseAssetWorkbook(
     return index;
   }
 
-  const rowsByField = assetFields.map((field) => {
-    const index = headerIndexes.get(excelFieldLabels[field].toLowerCase())
-      ?? headerIndexes.get(fieldLabels[field].toLowerCase());
-    if (index === undefined) throw new Error(`Missing required column: ${excelFieldLabels[field]}.`);
-    return { field, index };
+  const rowsByColumn = columns.map((column) => {
+    const aliases = [
+      column.label,
+      ...("field" in column
+        ? [assetColumnLabels[column.field], fieldLabels[column.field]]
+        : []),
+    ];
+    const index = aliases
+      .map((header) => headerIndexes.get(header.toLowerCase()))
+      .find((headerIndex) => headerIndex !== undefined);
+    if (index === undefined) throw new Error(`Missing required column: ${column.label}.`);
+    return { column, index };
   });
   const idColumn = columnIndex("Record ID");
-  const hasSubheaderRow = assetFields.slice(11, 14).every((field) =>
-    nextRowHeaders.some((header) => header.toLowerCase() === excelFieldLabels[field].toLowerCase()),
+  const lifeFields: AssetField[] = ["normalLife", "presentCondition", "adjustedLife"];
+  const hasSubheaderRow = columns.some((column) =>
+    "field" in column && lifeFields.includes(column.field)
+      && nextRowHeaders.some((header) => header.toLowerCase() === column.label.toLowerCase()),
   );
   const dataStartIndex = headerRowIndex + (hasSubheaderRow ? 2 : 1);
   const importedRows = rows.slice(dataStartIndex)
@@ -247,11 +249,13 @@ export function parseAssetWorkbook(
       if (id.includes("/")) {
         throw new Error(`Record ID on spreadsheet row ${rowIndex + dataStartIndex + 1} cannot contain "/".`);
       }
-      const fields = Object.fromEntries(rowsByField.map(({ field, index }) => [
-        field,
-        cellText(row[index]),
-      ])) as Record<AssetField, string>;
-      return { id, fields, sourceRow: rowIndex + dataStartIndex + 1 };
+      const fields: Partial<Record<AssetField, string>> = {};
+      const customFields: Record<string, string> = {};
+      for (const { column, index } of rowsByColumn) {
+        if ("field" in column) fields[column.field] = cellText(row[index]);
+        else customFields[column.customFieldId] = cellText(row[index]);
+      }
+      return { id, fields, customFields, sourceRow: rowIndex + dataStartIndex + 1 };
     });
 
   if (importedRows.length === 0) {

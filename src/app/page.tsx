@@ -4,10 +4,10 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent 
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, type User } from "firebase/auth";
 import { createPortal } from "react-dom";
 import { ArrowDownToLine, Check, ChevronDown, ChevronLeft, ChevronRight, ClipboardList, Fan, History, LogOut, MapPin, Menu, Pencil, Plus, Search, ShieldCheck, Trash2, Upload, Users, X } from "lucide-react";
-import { assetFields, demoAssets, type Asset, type AssetField } from "@/lib/assets";
+import { assetColumnLabels, assetFields, demoAssets, type Asset, type AssetField } from "@/lib/assets";
 import type { ImportedAssetRow } from "@/lib/asset-excel";
-import { auth, deleteAssetFromFirestore, deleteWorkbookPageFromFirestore, firebaseConfigured, initializeAssetsInFirestore, recordAdminActivity, saveAssetToFirestore, saveAssetsToFirestore, saveIndexEntriesToFirestore, saveTermDefinitionsToFirestore, saveWorkbookPageToFirestore, syncAdminUserProfile, watchAdminDashboard, watchAssetsInFirestore, watchIndexEntriesInFirestore, watchTermDefinitionsInFirestore, watchWorkbookPagesInFirestore, type AdminActivity, type AdminActivityInput, type AdminUserProfile } from "@/lib/firebase";
-import { defaultSheets, indexEntries, termDefinitions, type IndexEntry, type TermDefinition, type WorkbookSheet } from "@/lib/sheets";
+import { auth, deleteAssetFromFirestore, deleteWorkbookPageFromFirestore, firebaseConfigured, initializeAssetsInFirestore, recordAdminActivity, saveAssetToFirestore, saveAssetsToFirestore, saveIndexEntriesToFirestore, saveTermDefinitionsToFirestore, saveWorkbookPageToFirestore, syncAdminUserProfile, watchAdminActivitiesForUser, watchAdminDashboard, watchAssetsInFirestore, watchIndexEntriesInFirestore, watchTermDefinitionsInFirestore, watchWorkbookPagesInFirestore, type AdminActivity, type AdminActivityInput, type AdminUserProfile } from "@/lib/firebase";
+import { defaultSheets, indexEntries, termDefinitions, type IndexEntry, type TermDefinition, type WorkbookColumn, type WorkbookSheet } from "@/lib/sheets";
 
 const storageKey = "mepf-assets-v1";
 const sheetsStorageKey = "mepf-workbook-sheets-v1";
@@ -65,6 +65,30 @@ function csvValue(value: string) {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
+function getSheetColumns(sheet: WorkbookSheet): WorkbookColumn[] {
+  return sheet.columns?.length
+    ? sheet.columns
+    : assetFields.map((field) => ({ id: field, label: assetColumnLabels[field], field }));
+}
+
+function getAssetColumnValue(asset: Asset, column: WorkbookColumn): string {
+  return "field" in column
+    ? asset[column.field]
+    : asset.customFields?.[column.customFieldId] ?? "";
+}
+
+function groupSheetColumns(columns: WorkbookColumn[]) {
+  const lifeFields: AssetField[] = ["normalLife", "presentCondition", "adjustedLife"];
+  const groups: { columns: WorkbookColumn[]; isLife: boolean }[] = [];
+  for (const column of columns) {
+    const isLife = "field" in column && lifeFields.includes(column.field);
+    const lastGroup = groups.at(-1);
+    if (isLife && lastGroup?.isLife) lastGroup.columns.push(column);
+    else groups.push({ columns: [column], isLife });
+  }
+  return groups;
+}
+
 function errorDetails(error: unknown) {
   if (error && typeof error === "object") {
     const detail = error as { code?: unknown; message?: unknown };
@@ -83,6 +107,9 @@ export default function Home() {
   const [activeSheetId, setActiveSheetId] = useState("index");
   const [addingPage, setAddingPage] = useState(false);
   const [newPageName, setNewPageName] = useState("");
+  const [editingColumns, setEditingColumns] = useState<WorkbookColumn[] | null>(null);
+  const [newColumnLabel, setNewColumnLabel] = useState("");
+  const [columnFormError, setColumnFormError] = useState("");
   const [search, setSearch] = useState("");
   const [locationFilter, setLocationFilter] = useState("All locations");
   const [phaseFilter, setPhaseFilter] = useState("All phases");
@@ -106,9 +133,12 @@ export default function Home() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
   const [adminPanelOpen, setAdminPanelOpen] = useState(false);
   const [adminUsers, setAdminUsers] = useState<AdminUserProfile[]>([]);
+  const [selectedAdminUserId, setSelectedAdminUserId] = useState<string | null>(null);
   const [adminActivities, setAdminActivities] = useState<AdminActivity[]>([]);
   const [adminDashboardLoading, setAdminDashboardLoading] = useState(false);
   const [adminDashboardError, setAdminDashboardError] = useState("");
+  const [adminActivityLoading, setAdminActivityLoading] = useState(false);
+  const [adminActivityError, setAdminActivityError] = useState("");
   const importFileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -156,15 +186,25 @@ export default function Home() {
 
   useEffect(() => {
     if (!isAdmin || !adminPanelOpen) return;
-    return watchAdminDashboard((storedUsers, storedActivities) => {
+    return watchAdminDashboard((storedUsers) => {
       setAdminUsers(storedUsers);
-      setAdminActivities(storedActivities);
       setAdminDashboardLoading(false);
     }, (error) => {
-      setAdminDashboardError(`Could not load admin activity: ${error.message}`);
+      setAdminDashboardError(`Could not load app users: ${error.message}`);
       setAdminDashboardLoading(false);
     });
   }, [adminPanelOpen, isAdmin]);
+
+  useEffect(() => {
+    if (!isAdmin || !adminPanelOpen || !selectedAdminUserId) return;
+    return watchAdminActivitiesForUser(selectedAdminUserId, (activities) => {
+      setAdminActivities(activities);
+      setAdminActivityLoading(false);
+    }, (error) => {
+      setAdminActivityError(`Could not load this user's activity: ${error.message}`);
+      setAdminActivityLoading(false);
+    });
+  }, [adminPanelOpen, isAdmin, selectedAdminUserId]);
 
   useEffect(() => {
     let active = true;
@@ -301,6 +341,9 @@ export default function Home() {
   }, []);
 
   const activeSheet = sheets.find((sheet) => sheet.id === activeSheetId) ?? defaultSheets[0];
+  const tableColumns = getSheetColumns(activeSheet);
+  const tableColumnGroups = groupSheetColumns(tableColumns);
+  const hasLifeHeader = tableColumnGroups.some((columnGroup) => columnGroup.isLife);
 
   const locations = useMemo(
     () => [...new Set(assets.map((asset) => asset.equipmentLocation).filter(Boolean))].sort(),
@@ -312,16 +355,20 @@ export default function Home() {
   );
   const filteredAssets = useMemo(() => {
     const query = search.trim().toLowerCase();
-    const sheetAssets = activeSheet.kind === "group"
-      ? assets.filter((asset) => asset.equipmentGroup.toLowerCase() === activeSheet.group?.toLowerCase())
+    const sheet = sheets.find((item) => item.id === activeSheetId) ?? defaultSheets[0];
+    const columns = getSheetColumns(sheet);
+    const sheetAssets = sheet.kind === "group"
+      ? assets.filter((asset) => asset.equipmentGroup.toLowerCase() === sheet.group?.toLowerCase())
       : assets;
     return sheetAssets.filter((asset) => {
-      const matchesSearch = !query || assetFields.some((field) => asset[field].toLowerCase().includes(query));
+      const matchesSearch = !query || columns.some((column) =>
+        getAssetColumnValue(asset, column).toLowerCase().includes(query),
+      );
       const matchesLocation = locationFilter === "All locations" || asset.equipmentLocation === locationFilter;
       const matchesPhase = phaseFilter === "All phases" || asset.phasing === phaseFilter;
       return matchesSearch && matchesLocation && matchesPhase;
     });
-  }, [activeSheet, assets, locationFilter, phaseFilter, search]);
+  }, [activeSheetId, assets, locationFilter, phaseFilter, search, sheets]);
   const pageCount = Math.max(1, Math.ceil(filteredAssets.length / pageSize));
   const currentPage = Math.min(page, pageCount);
   const visibleAssets = filteredAssets.slice((currentPage - 1) * pageSize, currentPage * pageSize);
@@ -480,7 +527,13 @@ export default function Home() {
       setNotice("A page with that name already exists.");
       return;
     }
-    const sheet: WorkbookSheet = { id: `custom-${crypto.randomUUID()}`, label, kind: "group", group: label };
+    const sheet: WorkbookSheet = {
+      id: `custom-${crypto.randomUUID()}`,
+      label,
+      kind: "group",
+      group: label,
+      columns: assetFields.map((field) => ({ id: field, label: assetColumnLabels[field], field })),
+    };
     const nextSheets = [...sheets, sheet];
     setIsSaving(true);
     try {
@@ -537,6 +590,83 @@ export default function Home() {
     }
   }
 
+  function startEditingColumns() {
+    setEditingColumns(getSheetColumns(activeSheet).map((column) => ({ ...column })));
+    setNewColumnLabel("");
+    setColumnFormError("");
+  }
+
+  function addCustomColumn() {
+    const label = newColumnLabel.trim();
+    if (!label) return;
+    const id = `custom-${crypto.randomUUID()}`;
+    setEditingColumns((columns) => columns
+      ? [...columns, { id, customFieldId: id, label }]
+      : columns);
+    setNewColumnLabel("");
+  }
+
+  function moveColumn(columnId: string, offset: number) {
+    setEditingColumns((columns) => {
+      if (!columns) return columns;
+      const index = columns.findIndex((column) => column.id === columnId);
+      const nextIndex = index + offset;
+      if (index < 0 || nextIndex < 0 || nextIndex >= columns.length) return columns;
+      const nextColumns = [...columns];
+      [nextColumns[index], nextColumns[nextIndex]] = [nextColumns[nextIndex], nextColumns[index]];
+      return nextColumns;
+    });
+  }
+
+  async function saveWorkbookColumns(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!isAdmin) {
+      setColumnFormError("Only admins can customize table columns.");
+      return;
+    }
+    if (!editingColumns) return;
+    setColumnFormError("");
+    if (editingColumns.length === 0) {
+      setColumnFormError("Select at least one table column.");
+      return;
+    }
+    const columnAliases = editingColumns.flatMap((column) => [...new Set([
+      column.label.trim().toLowerCase(),
+      ...("field" in column ? [assetColumnLabels[column.field].toLowerCase(), fieldLabels[column.field].toLowerCase()] : []),
+    ])]);
+    if (columnAliases.some((label) => !label || label === "record id" || label === "life expectancy")
+      || new Set(columnAliases).size !== columnAliases.length) {
+      setColumnFormError("Column names must be non-empty, unique, and cannot use the reserved “Record ID” or “Life expectancy” headings.");
+      return;
+    }
+
+    const updatedSheet: WorkbookSheet = { ...activeSheet, columns: editingColumns };
+    const nextSheets = sheets.map((sheet) => sheet.id === updatedSheet.id ? updatedSheet : sheet);
+    setIsSaving(true);
+    try {
+      if (firebaseConfigured) await saveWorkbookPageToFirestore(updatedSheet);
+      setSheets(nextSheets);
+      window.localStorage.setItem(
+        sheetsStorageKey,
+        JSON.stringify(nextSheets.filter((sheet) => !defaultSheets.some((initial) => initial.id === sheet.id))),
+      );
+      const logWarning = await logAdminActivity({
+        action: "edit",
+        entity: "Workbook page",
+        entityId: updatedSheet.id,
+        description: updatedSheet.label,
+        changedFields: ["columns"],
+      });
+      setEditingColumns(null);
+      setColumnFormError("");
+      setNotice(`Table columns saved for ${updatedSheet.label}.${logWarning}`);
+    } catch (error) {
+      setColumnFormError(`Could not save table columns: ${errorDetails(error)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   function startAddingAsset() {
     const asset = blankAsset();
     if (activeSheet.kind === "group") asset.equipmentGroup = activeSheet.group ?? activeSheet.label;
@@ -545,8 +675,10 @@ export default function Home() {
   }
 
   function exportCsv() {
-    const header = assetFields.map((field) => csvValue(fieldLabels[field])).join(",");
-    const rows = filteredAssets.map((asset) => assetFields.map((field) => csvValue(asset[field])).join(","));
+    const header = tableColumns.map((column) => csvValue(column.label)).join(",");
+    const rows = filteredAssets.map((asset) =>
+      tableColumns.map((column) => csvValue(getAssetColumnValue(asset, column))).join(","),
+    );
     const blob = new Blob([[header, ...rows].join("\r\n")], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
@@ -561,7 +693,7 @@ export default function Home() {
     const groupAssets = assets.filter((asset) => asset.equipmentGroup.toLowerCase() === group.toLowerCase());
     try {
       const { downloadAssetTemplate } = await import("@/lib/asset-excel");
-      await downloadAssetTemplate(group, groupAssets);
+      await downloadAssetTemplate(group, groupAssets, tableColumns);
       setNotice(`Excel template downloaded for ${activeSheet.label}.`);
     } catch (error) {
       setNotice(`Could not create the Excel template: ${errorDetails(error)}`);
@@ -579,7 +711,7 @@ export default function Home() {
     setIsSaving(true);
     try {
       const { parseAssetWorkbook } = await import("@/lib/asset-excel");
-      const importedRows = parseAssetWorkbook(await file.arrayBuffer(), fieldLabels);
+      const importedRows = parseAssetWorkbook(await file.arrayBuffer(), fieldLabels, tableColumns);
       const existingById = new Map(currentGroupAssets.map((asset) => [asset.id, asset]));
       const importedIds = new Set<string>();
       for (const row of importedRows) {
@@ -627,13 +759,16 @@ export default function Home() {
       const importedAssets: Asset[] = [];
       for (const row of importedRows) {
         const existing = row.id ? existingById.get(row.id) : undefined;
-        const id = existing?.id ?? `zzzz-asset-${Date.now()}-${crypto.randomUUID()}`;
+        const id = existing?.id ?? `zzzz-asset-${crypto.randomUUID()}`;
         const asset: Asset = {
+          ...blankAsset(),
+          ...existing,
           ...row.fields,
           id,
           equipmentGroup: group,
           sortOrder: existing?.sortOrder ?? ++nextSortOrder,
           remarksColor: existing?.remarksColor ?? "",
+          customFields: { ...existing?.customFields, ...row.customFields },
         };
         const existingIndex = nextAssets.findIndex((item) => item.id === id);
         if (existingIndex >= 0) nextAssets[existingIndex] = asset;
@@ -655,7 +790,12 @@ export default function Home() {
         entity: "Equipment",
         entityId: group,
         description: `${importedRows.length} rows imported (${updatedRows} updated, ${newRows} added)`,
-        changedFields: [...new Set(importedRows.flatMap((row) => assetFields.filter((field) => row.fields[field])))],
+        changedFields: [...new Set(importedRows.flatMap((row) => [
+          ...Object.keys(row.fields),
+          ...Object.keys(row.customFields).map((customFieldId) =>
+            tableColumns.find((column) => "customFieldId" in column && column.customFieldId === customFieldId)?.label,
+          ).filter((label): label is string => Boolean(label)),
+        ]))],
       });
       setNotice(`Imported ${importedRows.length} rows: ${updatedRows} updated, ${newRows} added.${logWarning}`);
       setPendingImport(null);
@@ -673,7 +813,7 @@ export default function Home() {
     const nextSortOrder = Math.max(0, ...assets.map((item) => item.sortOrder ?? 0)) + 1;
     const asset: Asset = {
       ...editingAsset,
-      id: editingAsset.id || `zzzz-asset-${Date.now()}-${crypto.randomUUID()}`,
+      id: editingAsset.id || `zzzz-asset-${crypto.randomUUID()}`,
       sortOrder: editingAsset.sortOrder ?? nextSortOrder,
     };
     const nextAssets = assets.some((item) => item.id === asset.id)
@@ -690,8 +830,19 @@ export default function Home() {
         entityId: asset.id,
         description: asset.equipmentCode || asset.servicedArea || asset.id,
         changedFields: previousAsset
-          ? assetFields.filter((field) => previousAsset[field] !== asset[field])
-          : assetFields.filter((field) => Boolean(asset[field])),
+          ? [
+            ...assetFields.filter((field) => previousAsset[field] !== asset[field]),
+            ...tableColumns.filter((column): column is Extract<WorkbookColumn, { customFieldId: string }> =>
+              "customFieldId" in column
+              && previousAsset.customFields?.[column.customFieldId] !== asset.customFields?.[column.customFieldId],
+            ).map((column) => column.label),
+          ]
+          : [
+            ...assetFields.filter((field) => Boolean(asset[field])),
+            ...tableColumns.filter((column): column is Extract<WorkbookColumn, { customFieldId: string }> =>
+              "customFieldId" in column && Boolean(asset.customFields?.[column.customFieldId]),
+            ).map((column) => column.label),
+          ],
       });
       persistLocally(nextAssets);
       setAssets(nextAssets);
@@ -755,13 +906,13 @@ export default function Home() {
   const fanCoilCount = assets.filter((asset) => asset.equipmentType === "Fan Coil Unit").length;
 
   if (firebaseConfigured && authLoading) {
-    return <main className="auth-screen"><section className="auth-card" aria-live="polite"><span className="auth-kicker">MEPF / FACILITIES</span><h1>Checking your account</h1><p>Please wait while we verify your sign-in.</p></section></main>;
+    return <main className="auth-screen"><section className="auth-card" aria-live="polite"><span className="auth-kicker">ASSETS</span><h1>Checking your account</h1><p>Please wait while we verify your sign-in.</p></section></main>;
   }
 
   if (firebaseConfigured && !user) {
     return <main className="auth-screen">
       <section className="auth-card">
-        <span className="auth-kicker">MEPF / FACILITIES</span>
+        <span className="auth-kicker">ASSETS</span>
         <h1>Sign in</h1>
         <p>Use your authorized work email and password to access the asset register.</p>
         <form className="auth-form" onSubmit={(event) => void handleLogin(event)}>
@@ -778,56 +929,67 @@ export default function Home() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <a className="brand" href="#register" aria-label="MEPF asset register home">
-          <span>MEPF <span className="brand-divider">/</span> FACILITIES</span>
+        <a className="brand" href="#register" aria-label="Assets home">
+          <span>ASSETS</span>
         </a>
         <div className="topbar-right">
           <span className={`connection-state ${cloudStatus === "connected" ? "is-cloud" : "is-local"}`}><span className="state-dot" />{cloudStatus === "connected" ? "Cloud connected" : cloudStatus === "connecting" ? "Connecting..." : cloudStatus === "error" ? "Cloud sync error" : "Local workspace"}</span>
           {user && <><span className="account-chip">{user.email} · {isAdmin ? "Admin" : "User"}</span><button className="sign-out-button" onClick={() => void handleLogout()} aria-label="Sign out" title="Sign out"><LogOut size={15} /></button></>}
-          {isAdmin && <button className="sign-out-button admin-menu-button" onClick={() => { setAdminDashboardLoading(true); setAdminDashboardError(""); setAdminPanelOpen(true); }} aria-label="Open admin menu" title="Admin users and activity"><Menu size={18} /></button>}
-          <span className="year-chip">2022 <span>/</span> WMHC</span>
+          {isAdmin && <button className="sign-out-button admin-menu-button" onClick={() => { setAdminDashboardLoading(true); setAdminDashboardError(""); setAdminActivityError(""); setSelectedAdminUserId(null); setAdminActivities([]); setAdminPanelOpen(true); }} aria-label="Open admin menu" title="Admin users and activity"><Menu size={18} /></button>}
         </div>
       </header>
 
       {isAdmin && adminPanelOpen && typeof document !== "undefined" && createPortal(<div className="admin-drawer-backdrop" style={{ position: "fixed", zIndex: 1000, inset: 0, display: "flex", justifyContent: "flex-end", background: "rgb(23 38 30 / 40%)" }} onMouseDown={(event) => { if (event.target === event.currentTarget) setAdminPanelOpen(false); }}>
         <aside className="admin-drawer" style={{ width: "min(520px, 100vw)", height: "100dvh", display: "flex", flexDirection: "column", background: "#f8faf8", boxShadow: "-12px 0 35px rgb(20 40 29 / 18%)" }} role="dialog" aria-modal="true" aria-labelledby="admin-drawer-title">
           <header className="admin-drawer-header">
-            <div><span className="modal-kicker">ADMINISTRATION</span><h2 id="admin-drawer-title"><ShieldCheck size={19} /> Users & activity</h2></div>
+            <div>
+              <span className="modal-kicker">ADMINISTRATION</span>
+              <h2 id="admin-drawer-title">
+                {selectedAdminUserId
+                  ? <><button className="admin-back-button" onClick={() => { setSelectedAdminUserId(null); setAdminActivities([]); setAdminActivityError(""); }} aria-label="Back to app users"><ChevronLeft size={18} /></button><History size={19} /> {adminUsers.find((item) => item.uid === selectedAdminUserId)?.email ?? "User activity"}</>
+                  : <><ShieldCheck size={19} /> App users</>}
+              </h2>
+            </div>
             <button className="icon-button modal-close" onClick={() => setAdminPanelOpen(false)} aria-label="Close admin menu"><X size={18} /></button>
           </header>
           <div className="admin-drawer-content">
-            <section className="admin-dashboard-section">
-              <div className="admin-section-heading"><h3><Users size={16} /> App users</h3><span>{adminUsers.length}</span></div>
-              <p className="admin-help-text">People who have signed into this app. New users appear after their first sign-in. Roles are managed in Firebase Console / Cloud Shell.</p>
-              {adminDashboardLoading && <p className="admin-empty">Loading users and activity...</p>}
-              {!adminDashboardLoading && adminUsers.length === 0 && <p className="admin-empty">No app user profiles yet.</p>}
-              {adminUsers.length > 0 && <div className="admin-user-list">
-                {adminUsers.map((adminUser) => <article className="admin-user-row" key={adminUser.uid}>
-                  <span className="admin-user-avatar">{(adminUser.email[0] ?? "?").toUpperCase()}</span>
-                  <span className="admin-user-details"><strong>{adminUser.email || "Email unavailable"}</strong><small>Last seen {adminUser.lastSeen.toLocaleString()}</small></span>
-                  <span className={`admin-role-badge ${adminUser.isAdmin ? "is-admin" : ""}`}>{adminUser.isAdmin ? "Admin" : "User"}</span>
-                </article>)}
-              </div>}
-            </section>
-
-            <section className="admin-dashboard-section activity-section">
-              <div className="admin-section-heading"><h3><History size={16} /> Recent activity</h3><span>Latest 100</span></div>
-              <p className="admin-help-text">Changes made in the app after this feature was enabled. Field names are recorded; field values are not.</p>
-              {!adminDashboardLoading && adminActivities.length === 0 && <p className="admin-empty">No app activity has been recorded yet.</p>}
-              {adminActivities.length > 0 && <div className="admin-activity-list">
-                {adminActivities.map((activity) => <article className="admin-activity-row" key={activity.id}>
-                  <span className={`activity-action activity-${activity.action}`}>{activity.action}</span>
-                  <div className="admin-activity-details">
-                    <strong>{activity.actorEmail || "Unknown user"} <span>{activity.action === "add" ? "added" : activity.action === "edit" ? "edited" : activity.action === "delete" ? "deleted" : "imported"}</span> {activity.entity}</strong>
-                    <p>{activity.description}</p>
-                    {activity.changedFields.length > 0 && <small>Fields: {activity.changedFields.join(", ")}</small>}
-                    <small>{activity.createdAt.toLocaleString()}</small>
-                  </div>
-                </article>)}
-              </div>}
-              {adminDashboardError && <p className="admin-dashboard-error" role="alert">{adminDashboardError} Ensure the latest <code>firestore.rules</code> have been published.</p>}
-              <p className="admin-help-text admin-audit-note">This app activity log is for visibility, not a tamper-proof security audit.</p>
-            </section>
+            {!selectedAdminUserId ? (
+              <section className="admin-dashboard-section">
+                <div className="admin-section-heading"><h3><Users size={16} /> App users</h3><span>{adminUsers.length}</span></div>
+                <p className="admin-help-text">Select a user to view their recorded actions, changed field names, and timestamps. Roles are managed in Firebase Console / Cloud Shell.</p>
+                {adminDashboardLoading && <p className="admin-empty">Loading users...</p>}
+                {!adminDashboardLoading && adminUsers.length === 0 && <p className="admin-empty">No app user profiles yet.</p>}
+                {adminUsers.length > 0 && <div className="admin-user-list">
+                  {adminUsers.map((adminUser) => <button className="admin-user-row" key={adminUser.uid} onClick={() => { setAdminActivityLoading(true); setAdminActivityError(""); setAdminActivities([]); setSelectedAdminUserId(adminUser.uid); }}>
+                    <span className="admin-user-avatar">{(adminUser.email[0] ?? "?").toUpperCase()}</span>
+                    <span className="admin-user-details"><strong>{adminUser.email || "Email unavailable"}</strong><small>Last seen {adminUser.lastSeen.toLocaleString()}</small></span>
+                    <span className={`admin-role-badge ${adminUser.isAdmin ? "is-admin" : ""}`}>{adminUser.isAdmin ? "Admin" : "User"}</span>
+                    <ChevronRight className="admin-user-chevron" size={16} />
+                  </button>)}
+                </div>}
+                {adminDashboardError && <p className="admin-dashboard-error" role="alert">{adminDashboardError} Ensure the latest <code>firestore.rules</code> have been published.</p>}
+              </section>
+            ) : (
+              <section className="admin-dashboard-section activity-section">
+                <div className="admin-section-heading"><h3><History size={16} /> User activity</h3><span>{adminActivities.length}</span></div>
+                <p className="admin-help-text">Actions are shown newest first. Changed field names are recorded; previous and new field values are not.</p>
+                {adminActivityLoading && <p className="admin-empty">Loading user activity...</p>}
+                {!adminActivityLoading && adminActivities.length === 0 && <p className="admin-empty">No activity has been recorded for this user.</p>}
+                {adminActivities.length > 0 && <div className="admin-activity-list">
+                  {adminActivities.map((activity) => <article className="admin-activity-row" key={activity.id}>
+                    <span className={`activity-action activity-${activity.action}`}>{activity.action}</span>
+                    <div className="admin-activity-details">
+                      <strong>{activity.action === "add" ? "Added" : activity.action === "edit" ? "Edited" : activity.action === "delete" ? "Deleted" : "Imported"} {activity.entity}</strong>
+                      <p>{activity.description}</p>
+                      {activity.changedFields.length > 0 && <small>Fields changed: {activity.changedFields.join(", ")}</small>}
+                      <small>{activity.createdAt.toLocaleString()}</small>
+                    </div>
+                  </article>)}
+                </div>}
+                {adminActivityError && <p className="admin-dashboard-error" role="alert">{adminActivityError} Ensure the latest <code>firestore.rules</code> have been published.</p>}
+                <p className="admin-help-text admin-audit-note">This app activity log is for visibility, not a tamper-proof security audit.</p>
+              </section>
+            )}
           </div>
         </aside>
       </div>, document.body)}
@@ -859,6 +1021,7 @@ export default function Home() {
             <p className="page-subtitle">{activeSheet.kind === "terms" ? "Reference guide for MEPF equipment terms and condition ratings" : activeSheet.kind === "life" ? "Service life and replacement planning by equipment" : activeSheet.kind === "group" ? `Equipment records for ${activeSheet.group ?? activeSheet.label}` : "Equipment groups and descriptions"}</p>
           </div>
           <div className="page-heading-actions">
+            {isAdmin && activeSheet.kind === "group" && !defaultSheets.some((sheet) => sheet.id === activeSheet.id) && <button className="icon-button" onClick={startEditingColumns} disabled={isSaving}><Pencil size={15} /> Customize table</button>}
             {isAdmin && !defaultSheets.some((sheet) => sheet.id === activeSheet.id) && <button className="delete-page-button" onClick={() => void deleteWorkbookPage(activeSheet)} disabled={isSaving}><Trash2 size={15} /> Delete page</button>}
             {activeSheet.kind === "group" && <>
               <button className="icon-button excel-template-button" onClick={() => void downloadExcelTemplate()} disabled={isSaving || (firebaseConfigured && cloudStatus !== "connected")} title="Download Excel template"><ArrowDownToLine size={16} /> Template</button>
@@ -922,30 +1085,42 @@ export default function Home() {
           </div>
 
           <div className="table-scroll">
-            <table className="asset-table">
-              <colgroup>
-                <col style={{ width: "5%" }} /><col style={{ width: "6%" }} /><col style={{ width: "3%" }} />
-                <col style={{ width: "6%" }} /><col style={{ width: "7%" }} /><col style={{ width: "4%" }} />
-                <col style={{ width: "9%" }} /><col style={{ width: "4%" }} /><col style={{ width: "4%" }} />
-                <col style={{ width: "6%" }} /><col style={{ width: "5%" }} /><col style={{ width: "4.5%" }} />
-                <col style={{ width: "6%" }} /><col style={{ width: "4.5%" }} /><col style={{ width: "6%" }} />
-                <col style={{ width: "4%" }} /><col style={{ width: "4.5%" }} /><col style={{ width: "7%" }} />
-                <col style={{ width: "4.5%" }} />
-              </colgroup>
+            <table className="asset-table" style={activeSheet.columns ? { minWidth: `${Math.max(640, (tableColumns.length + 1) * 48)}px` } : undefined}>
               <thead>
                 <tr className="group-row">
-                  <th rowSpan={2}>EQPT GROUP</th><th rowSpan={2}>EQPT TYPE</th><th rowSpan={2}>EQPT TAG</th><th rowSpan={2}>EQPT LOCATION</th><th rowSpan={2}>SERVICED AREA</th><th rowSpan={2}>SEQUENCE NO.</th><th rowSpan={2}>EQPT CODE</th><th rowSpan={2}>BRAND</th><th rowSpan={2}>CAPACITY</th><th rowSpan={2}>HOTEL ASSET CODE</th><th rowSpan={2}>INSTALLATION YEAR</th><th colSpan={3} className="life-group">LIFE EXPECTANCY</th><th rowSpan={2}>REPLACEMENT YEAR</th><th rowSpan={2}>ZONING</th><th rowSpan={2}>PHASING</th><th rowSpan={2} className="remarks-heading">REMARKS</th><th rowSpan={2} className="action-heading"><span className="sr-only">Actions</span></th>
+                  {tableColumnGroups.map((columnGroup, index) => columnGroup.isLife
+                    ? <th key={`life-${index}`} colSpan={columnGroup.columns.length} className="life-group">LIFE EXPECTANCY</th>
+                    : <th key={columnGroup.columns[0].id} rowSpan={hasLifeHeader ? 2 : 1}>{columnGroup.columns[0].label}</th>)}
+                  <th rowSpan={hasLifeHeader ? 2 : 1} className="action-heading"><span className="sr-only">Actions</span></th>
                 </tr>
-                <tr className="subhead-row"><th>NORMAL</th><th>PRESENT CONDITION</th><th>ADJUSTED</th></tr>
+                {hasLifeHeader && <tr className="subhead-row">{tableColumnGroups.flatMap((columnGroup) =>
+                  columnGroup.isLife
+                    ? columnGroup.columns.map((column) => <th key={column.id}>{column.label}</th>)
+                    : [],
+                )}</tr>}
               </thead>
               <tbody>
                 {visibleAssets.map((asset, index) => (
                   <tr key={asset.id}>
-                    <td><span className="group-tag">{asset.equipmentGroup || "—"}</span></td><td>{asset.equipmentType || "—"}</td><td className="center-cell">{asset.equipmentTag || "—"}</td><td>{asset.equipmentLocation || "—"}</td><td>{asset.servicedArea || "—"}</td><td className="center-cell">{asset.sequenceNumber || "—"}</td><td className="code-cell">{asset.equipmentCode || "—"}</td><td>{asset.brand || "—"}</td><td className="center-cell">{asset.capacity || "—"}</td><td className="center-cell">{asset.hotelAssetCode || "—"}</td><td className="center-cell">{asset.installationYear || "—"}</td><td className="center-cell">{asset.normalLife || "—"}</td><td className="center-cell">{asset.presentCondition || "—"}</td><td className="center-cell">{asset.adjustedLife || "—"}</td><td className="center-cell">{asset.replacementYear || "—"}</td><td className="center-cell"><span className="zone-tag">{asset.zoning || "—"}</span></td><td className="center-cell">{asset.phasing || "—"}</td><td className={`remarks-cell remarks-${asset.remarksColor || "none"}`}><span>{asset.remarks}</span><select aria-label={`Remarks color for ${asset.equipmentCode || asset.servicedArea}`} value={asset.remarksColor ?? ""} onChange={(event) => void handleRemarksColorChange(asset, event.target.value as "" | "red" | "green")}><option value="">No color</option><option value="red">Red</option><option value="green">Green</option></select></td>
+                    {tableColumns.map((column) => {
+                      const value = getAssetColumnValue(asset, column);
+                      const field = "field" in column ? column.field : undefined;
+                      if (field === "remarks") {
+                        return <td key={column.id} className={`remarks-cell remarks-${asset.remarksColor || "none"}`}><span>{value}</span><select aria-label={`Remarks color for ${asset.equipmentCode || asset.servicedArea}`} value={asset.remarksColor ?? ""} onChange={(event) => void handleRemarksColorChange(asset, event.target.value as "" | "red" | "green")}><option value="">No color</option><option value="red">Red</option><option value="green">Green</option></select></td>;
+                      }
+                      return <td key={column.id} className={[
+                        ["equipmentTag", "sequenceNumber", "capacity", "hotelAssetCode", "installationYear", "normalLife", "presentCondition", "adjustedLife", "replacementYear", "zoning", "phasing"].includes(field ?? "") ? "center-cell" : "",
+                        field === "equipmentCode" ? "code-cell" : "",
+                      ].filter(Boolean).join(" ")}>{field === "equipmentGroup"
+                        ? <span className="group-tag">{value || "—"}</span>
+                        : field === "zoning"
+                          ? <span className="zone-tag">{value || "—"}</span>
+                          : value || "—"}</td>;
+                    })}
                     <td className="row-actions"><button className="row-icon-button" onClick={() => setEditingAsset({ ...asset })} aria-label={`Edit ${asset.equipmentCode || `asset ${index + 1}`}`} title="Edit asset"><Pencil size={14} /></button>{isAdmin && <button className="row-icon-button delete-action" onClick={() => void handleDelete(asset)} aria-label={`Delete ${asset.equipmentCode || `asset ${index + 1}`}`} title="Delete asset"><Trash2 size={14} /></button>}</td>
                   </tr>
                 ))}
-                {visibleAssets.length === 0 && <tr><td className="empty-state" colSpan={19}>No equipment matches these filters.</td></tr>}
+                {visibleAssets.length === 0 && <tr><td className="empty-state" colSpan={tableColumns.length + 1}>No equipment matches these filters.</td></tr>}
               </tbody>
             </table>
           </div>
@@ -969,6 +1144,51 @@ export default function Home() {
           <form onSubmit={(event) => void addWorkbookPage(event)}>
             <div className="add-page-form"><label className="form-field"><span>Page name</span><input autoFocus value={newPageName} onChange={(event) => setNewPageName(event.target.value)} placeholder="e.g. Plumbing-1" required /></label><p>Equipment added on this page will use the page name as its equipment group.</p></div>
             <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setAddingPage(false)} disabled={isSaving}>Cancel</button><button type="submit" className="primary-button" disabled={isSaving}>{isSaving ? "Saving..." : <><Plus size={16} /> Create page</>}</button></footer>
+          </form>
+        </section>
+      </div>}
+
+      {isAdmin && editingColumns && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !isSaving) setEditingColumns(null); }}>
+        <section className="asset-modal columns-modal" role="dialog" aria-modal="true" aria-labelledby="columns-title">
+          <header className="modal-header"><div><span className="modal-kicker">WORKBOOK PAGE</span><h2 id="columns-title">Customize {activeSheet.label}</h2></div><button className="icon-button modal-close" onClick={() => setEditingColumns(null)} disabled={isSaving} aria-label="Close dialog"><X size={18} /></button></header>
+          <form onSubmit={(event) => void saveWorkbookColumns(event)}>
+            <div className="column-customizer">
+              <p>Choose and reorder the columns shown on this page. The Excel template and CSV export will use the same columns.</p>
+              {columnFormError && <p className="column-form-error" role="alert">{columnFormError}</p>}
+              <fieldset className="available-columns">
+                <legend>Inventory columns</legend>
+                {assetFields.map((field) => {
+                  const selected = editingColumns.some((column) => "field" in column && column.field === field);
+                  return <label key={field}><input type="checkbox" checked={selected} onChange={(event) => {
+                    if (event.target.checked) {
+                      setEditingColumns((columns) => columns
+                        ? [...columns, { id: field, field, label: assetColumnLabels[field] }]
+                        : columns);
+                    } else {
+                      setEditingColumns((columns) => columns?.filter((column) => !("field" in column && column.field === field)) ?? null);
+                    }
+                  }} /><span>{fieldLabels[field]}</span></label>;
+                })}
+              </fieldset>
+              <div className="selected-columns">
+                <h3>Table order</h3>
+                {editingColumns.map((column, index) => <div className="selected-column" key={column.id}>
+                  {"field" in column
+                    ? <span>{fieldLabels[column.field]}</span>
+                    : <label className="custom-column-name"><span className="sr-only">Custom column name</span><input value={column.label} onChange={(event) => setEditingColumns((columns) => columns?.map((item) => item.id === column.id ? { ...item, label: event.target.value } : item) ?? null)} aria-label={`Name for custom column ${index + 1}`} /></label>}
+                  <div className="column-order-actions">
+                    <button type="button" className="row-icon-button" onClick={() => moveColumn(column.id, -1)} disabled={index === 0 || isSaving} aria-label={`Move ${column.label} up`} title="Move up"><ChevronLeft size={15} /></button>
+                    <button type="button" className="row-icon-button" onClick={() => moveColumn(column.id, 1)} disabled={index === editingColumns.length - 1 || isSaving} aria-label={`Move ${column.label} down`} title="Move down"><ChevronRight size={15} /></button>
+                    {"customFieldId" in column && <button type="button" className="row-icon-button delete-action" onClick={() => setEditingColumns((columns) => columns?.filter((item) => item.id !== column.id) ?? null)} disabled={isSaving} aria-label={`Remove ${column.label}`} title="Remove custom column"><Trash2 size={14} /></button>}
+                  </div>
+                </div>)}
+              </div>
+              <div className="add-custom-column">
+                <label className="form-field"><span>Add custom column</span><input value={newColumnLabel} onChange={(event) => setNewColumnLabel(event.target.value)} placeholder="e.g. Asset serial number" /></label>
+                <button type="button" className="secondary-button" onClick={addCustomColumn} disabled={!newColumnLabel.trim() || isSaving}><Plus size={15} /> Add column</button>
+              </div>
+            </div>
+            <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setEditingColumns(null)} disabled={isSaving}>Cancel</button><button type="submit" className="primary-button" disabled={isSaving}>{isSaving ? "Saving..." : <><Check size={16} /> Save table</>}</button></footer>
           </form>
         </section>
       </div>}
@@ -1006,7 +1226,9 @@ export default function Home() {
         <section className="asset-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
           <header className="modal-header"><div><span className="modal-kicker">ASSET REGISTER</span><h2 id="modal-title">{editingAsset.id ? "Edit equipment" : "Add equipment"}</h2></div><button className="icon-button modal-close" onClick={() => setEditingAsset(null)} aria-label="Close dialog"><X size={18} /></button></header>
           <form onSubmit={(event) => void handleSave(event)}>
-            <div className="form-grid">{assetFields.map((field) => <label className={`form-field ${field === "equipmentCode" || field === "servicedArea" ? "field-wide" : ""}`} key={field}><span>{fieldLabels[field]}</span><input autoFocus={field === "equipmentGroup" && !editingAsset.id} disabled={field === "equipmentGroup" && Boolean(editingAsset.id) && !isAdmin} value={editingAsset[field]} onChange={(event) => setEditingAsset({ ...editingAsset, [field]: event.target.value })} placeholder={field === "equipmentCode" ? "e.g. HVAC-4-FCU-BMT-Guest Entrance-1" : "Enter value"} /></label>)}</div>
+            <div className="form-grid">{assetFields.map((field) => <label className={`form-field ${field === "equipmentCode" || field === "servicedArea" ? "field-wide" : ""}`} key={field}><span>{fieldLabels[field]}</span><input autoFocus={field === "equipmentGroup" && !editingAsset.id} disabled={field === "equipmentGroup" && Boolean(editingAsset.id) && !isAdmin} value={editingAsset[field]} onChange={(event) => setEditingAsset({ ...editingAsset, [field]: event.target.value })} placeholder={field === "equipmentCode" ? "e.g. HVAC-4-FCU-BMT-Guest Entrance-1" : "Enter value"} /></label>)}
+              {tableColumns.filter((column): column is Extract<WorkbookColumn, { customFieldId: string }> => "customFieldId" in column).map((column) => <label className="form-field" key={column.customFieldId}><span>{column.label}</span><input value={editingAsset.customFields?.[column.customFieldId] ?? ""} onChange={(event) => setEditingAsset({ ...editingAsset, customFields: { ...editingAsset.customFields, [column.customFieldId]: event.target.value } })} placeholder="Enter value" /></label>)}
+            </div>
             <footer className="modal-footer"><button type="button" className="secondary-button" onClick={() => setEditingAsset(null)} disabled={isSaving}>Cancel</button><button type="submit" className="primary-button" disabled={isSaving}>{isSaving ? "Saving..." : <><Check size={16} /> Save equipment</>}</button></footer>
           </form>
         </section>
@@ -1016,16 +1238,19 @@ export default function Home() {
         <section className="asset-modal import-preview-modal" role="dialog" aria-modal="true" aria-labelledby="import-preview-title">
           <header className="modal-header"><div><span className="modal-kicker">CHECK BEFORE SAVING</span><h2 id="import-preview-title">Preview Excel import · {pendingImport.groupLabel}</h2></div><button className="icon-button modal-close" onClick={() => setPendingImport(null)} disabled={isSaving} aria-label="Close preview"><X size={18} /></button></header>
           <div className="import-preview-content">
-            <p className="import-preview-note">Review each spreadsheet row and its detected column values. Equipment group will be set to <strong>{pendingImport.groupLabel}</strong> automatically. Blank cells stay blank; nothing is saved until you confirm.</p>
+            <p className="import-preview-note">Review each spreadsheet row and its detected column values. Equipment group will be set to <strong>{pendingImport.groupLabel}</strong> automatically. Blank cells clear values in included columns; columns omitted from this customized template stay unchanged. Nothing is saved until you confirm.</p>
             <div className="import-preview-scroll">
               <table className="import-preview-table">
-                <thead><tr><th>Spreadsheet row</th><th>Record ID</th>{assetFields.map((field) => <th key={field}>{fieldLabels[field]}</th>)}</tr></thead>
+                <thead><tr><th>Spreadsheet row</th><th>Record ID</th>{tableColumns.map((column) => <th key={column.id}>{column.label}</th>)}</tr></thead>
                 <tbody>{pendingImport.rows.map((row, index) => <tr key={`${row.id}-${index}`}>
                   <td>{row.sourceRow}</td>
                   <td>{row.id || "New"}</td>
-                  {assetFields.map((field) => <td key={field} className={!row.fields[field] ? "import-preview-empty" : ""}>
-                    {field === "equipmentGroup" ? pendingImport.group : row.fields[field] || "—"}
-                  </td>)}
+                  {tableColumns.map((column) => {
+                    const value = "field" in column ? row.fields[column.field] : row.customFields[column.customFieldId];
+                    return <td key={column.id} className={!value ? "import-preview-empty" : ""}>
+                      {"field" in column && column.field === "equipmentGroup" ? pendingImport.group : value || "—"}
+                    </td>;
+                  })}
                 </tr>)}</tbody>
               </table>
             </div>
