@@ -184,7 +184,11 @@ h1 { margin: 10px 0 5px; font-size: 29px; line-height: 1.12; font-weight: 650; l
 .icon-button:hover, .row-icon-button:hover { background: #f2f6f3; }
 .notice { min-height: 34px; display: flex; align-items: center; gap: 7px; padding: 0 16px; color: #41644f; background: #f0f7f2; border-bottom: 1px solid #e0ece3; font-size: 11px; }
 .notice button { margin-left: auto; }
-.table-scroll { width: 100%; overflow-x: auto; }
+.table-scroll { width: 100%; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: #9eaaa1 #edf1ed; }
+.table-scroll::-webkit-scrollbar { height: 8px; }
+.table-scroll::-webkit-scrollbar-track { background: #edf1ed; }
+.table-scroll::-webkit-scrollbar-thumb { border: 2px solid #edf1ed; border-radius: 8px; background: #9eaaa1; }
+.table-scroll-hint { display: none; }
 .asset-table { width: 100%; min-width: 0; border-collapse: separate; border-spacing: 0; table-layout: fixed; }
 .asset-table th { position: sticky; z-index: 2; padding: 0 2px; text-align: left; color: #44534a; border-right: 1px solid #e1e7e3; font-size: 7px; font-weight: 750; letter-spacing: 0; }
 .asset-table thead { background: #edf2ee; }
@@ -310,6 +314,9 @@ h1 { margin: 10px 0 5px; font-size: 29px; line-height: 1.12; font-weight: 650; l
   .phase-select { min-width: 100px; }
   .export-button { width: 36px; padding: 0; }
   .export-button span { display: none; }
+  .table-scroll { overflow-x: scroll; }
+  .table-scroll-hint { display: block; margin: 0; padding: 7px 10px; color: #748078; background: #f7faf7; border-bottom: 1px solid #e8ece9; font-size: 10px; }
+  .asset-table { width: 1100px; }
   .table-footer { padding: 0 10px; font-size: 9px; }
   .pagination-controls { gap: 5px; }
   .page-button { width: 25px; height: 25px; }

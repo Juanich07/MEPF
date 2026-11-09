@@ -1084,7 +1084,8 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="table-scroll">
+          <div className="table-scroll" role="region" aria-label="Equipment table. Scroll horizontally to view all columns." tabIndex={0}>
+            <p className="table-scroll-hint">Swipe or scroll horizontally to view all columns</p>
             <table className="asset-table" style={activeSheet.columns ? { minWidth: `${Math.max(640, (tableColumns.length + 1) * 48)}px` } : undefined}>
               <thead>
                 <tr className="group-row">
